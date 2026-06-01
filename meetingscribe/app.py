@@ -1,0 +1,249 @@
+import logging
+import os
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+import AppKit
+import objc
+import rumps
+
+from meetingscribe.config import DATA_DIR, ensure_dirs
+from meetingscribe.recorder import AudioRecorder, find_blackhole_device
+from meetingscribe.transcriber import Transcriber
+from meetingscribe.summarizer import Summarizer
+from meetingscribe.notes import save_to_notes
+from meetingscribe.progress import ProgressWindow
+
+ensure_dirs()
+LOG_PATH = DATA_DIR / "meetingscribe.log"
+logging.basicConfig(
+    filename=str(LOG_PATH),
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("meetingscribe")
+
+ICON_IDLE = "🎙"
+ICON_RECORDING = "🔴"
+BUNDLE_ID = "com.meetingscribe.app"
+
+
+def _is_already_running():
+    running = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(BUNDLE_ID)
+    my_pid = os.getpid()
+    for app in running:
+        if app.processIdentifier() != my_pid:
+            return True
+    return False
+
+
+def notify(subtitle, message):
+    try:
+        rumps.notification(
+            title="MeetingScribe",
+            subtitle=subtitle,
+            message=message,
+        )
+    except Exception:
+        pass
+
+
+def _main_thread_alert(title, message):
+    """Show an alert on the main thread safely."""
+    def _show():
+        rumps.alert(title=title, message=message)
+
+    if threading.current_thread() is threading.main_thread():
+        _show()
+    else:
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(_show)
+
+
+class MeetingScribeApp(rumps.App):
+    def __init__(self):
+        super().__init__(ICON_IDLE, quit_button=None)
+        self.menu = [
+            rumps.MenuItem("Start Recording", callback=self.toggle_recording),
+            None,
+            rumps.MenuItem("Quit", callback=rumps.quit_application),
+        ]
+        self._recorder = AudioRecorder()
+        self._transcriber = Transcriber()
+        self._summarizer = Summarizer()
+        self._recording = False
+        self._processing = False
+        self._start_time = None
+        self._timer_thread = None
+        self._progress_window = None
+
+        log.info("MeetingScribe started (pid %d)", os.getpid())
+        log.info("BlackHole device: %s", find_blackhole_device())
+
+        if find_blackhole_device() is None:
+            rumps.alert(
+                title="MeetingScribe — BlackHole Not Found",
+                message=(
+                    "BlackHole audio driver is not installed or not active.\n"
+                    "System audio capture will be unavailable — mic only.\n\n"
+                    "Install with: brew install blackhole-2ch\n"
+                    "Then set BlackHole as your system audio output or "
+                    "create a Multi-Output Device in Audio MIDI Setup.\n\n"
+                    "You may need to restart after installing."
+                ),
+            )
+
+    def toggle_recording(self, sender):
+        if self._processing:
+            rumps.alert("MeetingScribe", "Still processing the last recording. Please wait.")
+            return
+        if not self._recording:
+            self._start_recording(sender)
+        else:
+            self._stop_recording(sender)
+
+    def _start_recording(self, sender):
+        self._recorder = AudioRecorder()
+        self._recorder.start()
+        self._recording = True
+        self._start_time = time.time()
+        sender.title = "Stop Recording"
+        self.title = ICON_RECORDING
+        log.info("Recording started")
+
+        self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
+        self._timer_thread.start()
+
+    def _update_timer(self):
+        while self._recording:
+            elapsed = int(time.time() - self._start_time)
+            mins, secs = divmod(elapsed, 60)
+            hours, mins = divmod(mins, 60)
+            if hours:
+                self.title = f"{ICON_RECORDING} {hours}:{mins:02d}:{secs:02d}"
+            else:
+                self.title = f"{ICON_RECORDING} {mins}:{secs:02d}"
+            time.sleep(1)
+
+    def _show_progress(self):
+        self._progress_window = ProgressWindow()
+        self._progress_window.show()
+
+    def _close_progress(self):
+        if self._progress_window:
+            self._progress_window.close()
+            self._progress_window = None
+
+    def _stop_recording(self, sender):
+        self._recording = False
+        wav_path = self._recorder.stop()
+        sender.title = "Start Recording"
+        self.title = "⏳"
+        self._processing = True
+        log.info("Recording stopped, saved to %s", wav_path)
+
+        self._show_progress()
+
+        thread = threading.Thread(
+            target=self._process_recording,
+            args=(wav_path,),
+            daemon=True,
+        )
+        thread.start()
+
+    def _update_progress(self, stage, pct=None, detail=""):
+        self.title = f"⏳ {stage}"
+        log.info("Status: %s (%.0f%%)", stage, (pct or 0) * 100)
+        if self._progress_window:
+            self._progress_window.set_stage(stage)
+            self._progress_window.set_detail(detail)
+            if pct is not None:
+                self._progress_window.set_indeterminate(False)
+                self._progress_window.set_progress(pct * 100)
+            else:
+                self._progress_window.set_indeterminate(True)
+
+    def _finish(self, title, message):
+        self.title = ICON_IDLE
+        self._processing = False
+        self._close_progress()
+        notify(title, message)
+        _main_thread_alert(f"MeetingScribe — {title}", message)
+
+    def _process_recording(self, wav_path):
+        try:
+            self._update_progress("Loading model...", detail="First time takes a moment")
+            self._transcriber._load_model()
+
+            self._update_progress("Transcribing...", pct=0.0, detail="Converting speech to text")
+
+            def on_transcribe_progress(pct):
+                self._update_progress(
+                    "Transcribing...",
+                    pct=pct,
+                    detail=f"{int(pct * 100)}% complete",
+                )
+
+            transcript = self._transcriber.transcribe(wav_path, on_progress=on_transcribe_progress)
+            log.info("Transcription complete, length: %d chars", len(transcript))
+
+            if not transcript.strip():
+                log.warning("No speech detected")
+                self._finish("No speech detected", "The recording didn't contain any recognizable speech.")
+                return
+
+            self._update_progress("Summarizing...", detail="Generating meeting notes with AI")
+
+            summary = self._summarizer.summarize(transcript)
+            log.info("Summarization complete, length: %d chars", len(summary))
+
+            self._update_progress("Saving to Notes...", pct=0.95, detail="Almost done")
+
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            title = f"Meeting — {timestamp}"
+
+            body = (
+                f"MEETING NOTES — {timestamp}\n"
+                f"{'=' * 50}\n\n"
+                f"{summary}\n\n"
+                f"{'=' * 50}\n"
+                f"RAW TRANSCRIPT\n"
+                f"{'=' * 50}\n\n"
+                f"{transcript}"
+            )
+
+            saved = save_to_notes(title, body)
+
+            if saved:
+                log.info("Note saved: %s", title)
+                try:
+                    os.remove(wav_path)
+                    log.info("Cleaned up recording: %s", wav_path)
+                except OSError as cleanup_err:
+                    log.warning("Could not delete recording: %s", cleanup_err)
+                self._finish("Done!", f"Your meeting notes have been saved to Apple Notes.\n\n\"{title}\"")
+            else:
+                log.error("Failed to save to Notes")
+                self._finish("Warning", "Transcription complete but couldn't save to Apple Notes.\nCheck that Notes is set up with an iCloud account.")
+
+        except Exception as e:
+            log.exception("Error processing recording")
+            self._finish("Error", f"Something went wrong:\n\n{str(e)[:300]}")
+
+
+def main():
+    ensure_dirs()
+
+    if _is_already_running():
+        log.info("Another instance already running, exiting immediately")
+        sys.exit(0)
+
+    app = MeetingScribeApp()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()

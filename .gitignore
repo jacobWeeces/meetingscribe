@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+*.pyc
+.env
+dist/
+build/
+whisper_model/
+.DS_Store
+*.wav
+.worktrees/
