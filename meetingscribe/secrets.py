@@ -11,7 +11,7 @@ log = logging.getLogger("meetingscribe")
 
 DEFAULT_SERVICE = "MeetingScribe"
 DEFAULT_ACCOUNT = "anthropic_api_key"
-_OK = 0  # errSecSuccess
+_OK = Security.errSecSuccess
 
 
 def keychain_get(account=DEFAULT_ACCOUNT, service=DEFAULT_SERVICE):
@@ -25,10 +25,21 @@ def keychain_get(account=DEFAULT_ACCOUNT, service=DEFAULT_SERVICE):
     status, data = Security.SecItemCopyMatching(query, None)
     if status != _OK or not data:
         return ""
-    return bytes(data).decode("utf-8")
+    try:
+        return bytes(data).decode("utf-8")
+    except UnicodeDecodeError:
+        log.warning(
+            "Keychain value for %s/%s is not valid UTF-8; treating as absent",
+            service,
+            account,
+        )
+        return ""
 
 
 def keychain_set(value, account=DEFAULT_ACCOUNT, service=DEFAULT_SERVICE):
+    if not value:
+        log.warning("keychain_set called with empty value; use keychain_delete to remove")
+        return False
     keychain_delete(account, service)  # overwrite cleanly
     attrs = {
         Security.kSecClass: Security.kSecClassGenericPassword,
