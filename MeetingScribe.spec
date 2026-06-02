@@ -1,6 +1,8 @@
 import os
 import site
 
+_version = os.environ.get('MS_VERSION', '0.1.0')
+
 block_cipher = None
 
 site_packages = site.getsitepackages() + [site.getusersitepackages()]
@@ -12,7 +14,6 @@ a = Analysis(
     datas=[
         ('whisper_model', 'whisper_model'),
         ('/opt/homebrew/lib/python3.14/site-packages/faster_whisper/assets', 'faster_whisper/assets'),
-        ('.env', '.'),
     ],
     hiddenimports=[
         'rumps',
@@ -33,6 +34,7 @@ a = Analysis(
         'objc',
         'Foundation',
         'PyObjCTools',
+        'Security',
     ],
     hookspath=[],
     hooksconfig={},
@@ -97,8 +99,13 @@ app = BUNDLE(
         'LSUIElement': True,
         'CFBundleName': 'MeetingScribe',
         'CFBundleDisplayName': 'MeetingScribe',
-        'CFBundleVersion': '0.1.0',
-        'CFBundleShortVersionString': '0.1.0',
+        'CFBundleVersion': _version,
+        'CFBundleShortVersionString': _version,
         'NSMicrophoneUsageDescription': 'MeetingScribe needs microphone access to record meetings.',
+        'SUFeedURL': 'https://github.com/jacobWeeces/meetingscribe/releases/latest/download/appcast.xml',
+        'SUPublicEDKey': 'SP/964iRTWkRNR91DJNIpPBGrxIu1/IHSr+JnE6GkvA=',
+        'SUEnableAutomaticChecks': True,
+        'SUScheduledCheckInterval': 86400,
+        'SUEnableInstallerLauncherService': True,
     },
 )
