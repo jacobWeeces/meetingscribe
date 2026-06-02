@@ -93,7 +93,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='MeetingScribe.app',
-    icon=None,
+    icon='assets/MeetingScribe.icns',
     bundle_identifier='com.meetingscribe.app',
     info_plist={
         'LSUIElement': True,

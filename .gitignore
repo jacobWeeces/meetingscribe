@@ -9,3 +9,4 @@ whisper_model/
 *.wav
 .worktrees/
 *.zip
+assets/MeetingScribe.iconset/
