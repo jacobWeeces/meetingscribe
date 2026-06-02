@@ -17,6 +17,7 @@ from meetingscribe.summarizer import Summarizer
 from meetingscribe.notes import save_to_notes
 from meetingscribe.progress import ProgressWindow
 from meetingscribe.secrets import get_api_key, set_api_key
+from meetingscribe.updater import init_sparkle, check_for_updates
 
 ensure_dirs()
 LOG_PATH = DATA_DIR / "meetingscribe.log"
@@ -91,6 +92,7 @@ class MeetingScribeApp(rumps.App):
             rumps.MenuItem("Start Recording", callback=self.toggle_recording),
             None,
             rumps.MenuItem("Set API Key…", callback=self.set_api_key_clicked),
+            rumps.MenuItem("Check for Updates…", callback=check_for_updates),
             None,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
@@ -121,6 +123,8 @@ class MeetingScribeApp(rumps.App):
 
         if not get_api_key():
             prompt_for_api_key()
+
+        init_sparkle()
 
     def set_api_key_clicked(self, _sender):
         prompt_for_api_key()
