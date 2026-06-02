@@ -49,6 +49,15 @@ codesign -f -s "$SIGN_ID" -o runtime --timestamp "$FW"
 # (d) Sign the remaining app Mach-O (PyInstaller .so/.dylib), excluding the framework already signed.
 find "$APP" -path "$FW" -prune -o -type f \( -name "*.so" -o -name "*.dylib" \) -print0 \
   | xargs -0 -r codesign -f -s "$SIGN_ID" -o runtime --timestamp
+# (d2) Sign the embedded Python.framework explicitly. Its main Mach-O ("Python") has no
+#      file extension, so the *.so/*.dylib sweep above misses it; notarization requires a
+#      Developer ID signature + secure timestamp on it.
+if [ -d "$APP/Contents/Frameworks/Python.framework" ]; then
+  for pybin in "$APP"/Contents/Frameworks/Python.framework/Versions/*/Python; do
+    [ -e "$pybin" ] && codesign -f -s "$SIGN_ID" -o runtime --timestamp "$pybin"
+  done
+  codesign -f -s "$SIGN_ID" -o runtime --timestamp "$APP/Contents/Frameworks/Python.framework"
+fi
 # (e) Sign the outer app bundle LAST (no --deep).
 codesign -f -s "$SIGN_ID" -o runtime --timestamp "$APP"
 codesign --verify --strict --verbose=2 "$APP"
