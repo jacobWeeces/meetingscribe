@@ -61,3 +61,22 @@ def keychain_delete(account=DEFAULT_ACCOUNT, service=DEFAULT_SERVICE):
         Security.kSecAttrAccount: account,
     }
     Security.SecItemDelete(query)
+
+
+def _dev_fallback_key():
+    """Dev-machine convenience only: $ANTHROPIC_API_KEY or a .env. Never bundled."""
+    from meetingscribe import config
+    return config._load_api_key()
+
+
+def get_api_key():
+    """Resolve the key: Keychain first, then dev env/.env. '' if unset."""
+    key = keychain_get()
+    if key:
+        return key
+    return _dev_fallback_key()
+
+
+def set_api_key(value):
+    """Persist the API key to the Keychain. Returns True on success."""
+    return keychain_set(value.strip())
