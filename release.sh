@@ -30,6 +30,9 @@ mkdir -p "$APP/Contents/Frameworks"
 
 echo "==> 4/9 Codesign inside-out"
 FW="$APP/Contents/Frameworks/Sparkle.framework"
+# Strip extended attributes (resource forks / Finder info) from the whole bundle;
+# codesign rejects them under hardened runtime ("...detritus not allowed").
+/usr/bin/xattr -cr "$APP"
 # (a) Sign nested Mach-O executables inside the framework first (main binary, Autoupdate,
 #     and the executables inside the XPC services / Updater.app).
 find "$FW/Versions" -type f -perm -111 \
