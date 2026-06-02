@@ -61,11 +61,11 @@ build_variant() {
   rm -f "$zip"; /usr/bin/ditto -c -k --keepParent "$app" "$zip"
 
   echo "==> [$profile] EdDSA-sign + appcast ($appcast_name)"
-  cp "$appcast_name" "$vroot/dist/appcast.xml" 2>/dev/null || true
+  cp "$appcast_name" "$vroot/dist/$appcast_name" 2>/dev/null || true
   "$SPARKLE_DIR/bin/generate_appcast" \
     --download-url-prefix "https://github.com/${REPO}/releases/download/v${VERSION}/" \
     "$vroot/dist/"
-  cp "$vroot/dist/appcast.xml" "$appcast_name"
+  cp "$vroot/dist/$appcast_name" "$appcast_name"
 }
 
 echo "==> 2/4 Build + sign + notarize BOTH variants (~10 min: two notarizations)"
