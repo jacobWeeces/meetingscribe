@@ -25,6 +25,12 @@ re-sending a `.app` each time.
   build → sign → notarize → staple → zip → EdDSA-sign → appcast → GitHub upload.
 - **API key:** Laurelle uses **her own** Anthropic key. Removed from the bundle entirely;
   prompted once on first launch and stored in macOS Keychain. Your key never ships.
+  (Correction discovered during planning: the key is no longer hardcoded in source —
+  `config.py:_load_api_key()` reads `$ANTHROPIC_API_KEY` or a `.env`, and the current
+  `.spec` **bundles `.env` into the app** via `datas=[('.env', '.')]`. So the "before"
+  state is "key in bundled `.env`," and the remediation must also **remove `('.env', '.')`
+  from the `.spec` datas**. The Keychain path requires `pyobjc-framework-Security`, which is
+  not currently installed — added as a dependency.)
 - **Sparkle framework:** Not vendored in the repo. The release script downloads a pinned
   Sparkle release at build time (cached in gitignored `build/`).
 - **End-user priority:** Minimize friction for Laurelle — her only setup step is pasting
@@ -135,8 +141,14 @@ EdDSA private key (Keychain).
 
 ## API key remediation (first-run, Keychain)
 
-Remove the hardcoded key from `config.py` entirely. Replace with a Keychain-backed lookup
-in a small `secrets.py`:
+**Starting point (verified during planning):** the key is already out of source —
+`config.py:_load_api_key()` reads `$ANTHROPIC_API_KEY` or a `.env`, and the `.spec` bundles
+that `.env` into the app (`datas=[('.env', '.')]`). The remediation: make Keychain the
+primary source, **drop `('.env', '.')` from the `.spec`** so no key ships, and keep the
+existing env/.env reads only as a dev-machine fallback.
+
+Add a Keychain-backed lookup in a small `secrets.py` (using `pyobjc-framework-Security`,
+a new dependency since `import Security` is not currently available):
 
 ```python
 def get_api_key():
@@ -148,10 +160,14 @@ def get_api_key():
     return key
 ```
 
-- **Implementation:** PyObjC `Security` framework directly (no new dependency — PyObjC is
-  already bundled), using `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` so the key never
-  syncs to iCloud Keychain and requires the device unlocked. Chosen as the most secure
-  option (vs. the `keyring` library, which can't set device-only access).
+- **Implementation:** PyObjC `Security` framework `SecItem*` APIs (via the
+  `pyobjc-framework-Security` package — a new dependency, since `import Security` currently
+  fails), using `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` so the key never syncs to
+  iCloud Keychain and requires the device unlocked. Chosen as the most secure option (vs.
+  the `keyring` library, which can't set device-only access; and vs. a `security`-CLI
+  subprocess, which would leak the key through process arguments).
+- **`.spec` change:** remove `('.env', '.')` from `datas` so no key is ever bundled, and add
+  `Security` to `hiddenimports`.
 - **Laurelle's experience:** first launch shows a small dialog ("Enter your Anthropic API
   key to enable summaries") with a link to where she gets one. Pastes once → stored → never
   asked again. Recording/transcription still work if blank; only the AI summary is skipped
