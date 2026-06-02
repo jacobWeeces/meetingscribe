@@ -25,7 +25,8 @@ python3 -m PyInstaller MeetingScribe.spec --noconfirm
 
 echo "==> 3/9 Embed Sparkle.framework"
 mkdir -p "$APP/Contents/Frameworks"
-cp -R "$SPARKLE_DIR/Sparkle.framework" "$APP/Contents/Frameworks/"
+/usr/bin/ditto "$SPARKLE_DIR/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+/usr/bin/xattr -cr "$APP/Contents/Frameworks/Sparkle.framework"
 
 echo "==> 4/9 Codesign inside-out"
 FW="$APP/Contents/Frameworks/Sparkle.framework"
