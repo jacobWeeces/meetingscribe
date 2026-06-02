@@ -71,10 +71,10 @@ def _dev_fallback_key():
 
 def get_api_key():
     """Resolve the key: Keychain first, then dev env/.env. '' if unset."""
-    key = keychain_get()
+    key = keychain_get().strip()
     if key:
         return key
-    return _dev_fallback_key()
+    return (_dev_fallback_key() or "").strip()
 
 
 def set_api_key(value):
