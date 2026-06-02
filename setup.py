@@ -11,6 +11,7 @@ setup(
         "scipy>=1.14.0",
         "faster-whisper>=1.0.0",
         "anthropic>=0.80.0",
+        "pyobjc-framework-Security>=10.0",
     ],
     entry_points={
         "console_scripts": [
