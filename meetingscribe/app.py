@@ -42,6 +42,18 @@ def _is_already_running():
     return False
 
 
+def _bring_to_front():
+    """Bring this LSUIElement (background) app's windows to the foreground.
+
+    Without this, rumps alerts/windows open behind the active app and the user
+    never sees them. Safe to call before any modal.
+    """
+    try:
+        AppKit.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
+
+
 def notify(subtitle, message):
     try:
         rumps.notification(
@@ -56,6 +68,7 @@ def notify(subtitle, message):
 def _main_thread_alert(title, message):
     """Show an alert on the main thread safely."""
     def _show():
+        _bring_to_front()
         rumps.alert(title=title, message=message)
 
     if threading.current_thread() is threading.main_thread():
@@ -78,6 +91,7 @@ def prompt_for_api_key():
         cancel="Skip",
         dimensions=(360, 24),
     )
+    _bring_to_front()
     resp = win.run()
     if resp.clicked and resp.text.strip():
         set_api_key(resp.text)
