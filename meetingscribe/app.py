@@ -16,6 +16,7 @@ from meetingscribe.transcriber import Transcriber
 from meetingscribe.summarizer import Summarizer
 from meetingscribe.notes import save_to_notes
 from meetingscribe.progress import ProgressWindow
+from meetingscribe.secrets import get_api_key, set_api_key
 
 ensure_dirs()
 LOG_PATH = DATA_DIR / "meetingscribe.log"
@@ -63,11 +64,33 @@ def _main_thread_alert(title, message):
         AppHelper.callAfter(_show)
 
 
+def prompt_for_api_key():
+    """Ask Laurelle for her Anthropic API key and store it. Returns the key or ''."""
+    win = rumps.Window(
+        title="MeetingScribe — Anthropic API Key",
+        message=(
+            "Paste your Anthropic API key to enable AI meeting summaries.\n"
+            "Get one at https://console.anthropic.com/settings/keys"
+        ),
+        default_text="",
+        ok="Save",
+        cancel="Skip",
+        dimensions=(360, 24),
+    )
+    resp = win.run()
+    if resp.clicked and resp.text.strip():
+        set_api_key(resp.text)
+        return resp.text.strip()
+    return ""
+
+
 class MeetingScribeApp(rumps.App):
     def __init__(self):
         super().__init__(ICON_IDLE, quit_button=None)
         self.menu = [
             rumps.MenuItem("Start Recording", callback=self.toggle_recording),
+            None,
+            rumps.MenuItem("Set API Key…", callback=self.set_api_key_clicked),
             None,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
@@ -95,6 +118,12 @@ class MeetingScribeApp(rumps.App):
                     "You may need to restart after installing."
                 ),
             )
+
+        if not get_api_key():
+            prompt_for_api_key()
+
+    def set_api_key_clicked(self, _sender):
+        prompt_for_api_key()
 
     def toggle_recording(self, sender):
         if self._processing:
@@ -197,7 +226,18 @@ class MeetingScribeApp(rumps.App):
 
             self._update_progress("Summarizing...", detail="Generating meeting notes with AI")
 
-            summary = self._summarizer.summarize(transcript)
+            from meetingscribe.summarizer import NoAPIKeyError
+            try:
+                summary = self._summarizer.summarize(transcript)
+            except NoAPIKeyError:
+                from datetime import datetime as _dt
+                save_to_notes(f"Meeting — {_dt.now():%Y-%m-%d %H:%M}", transcript)
+                self._finish(
+                    "No API key",
+                    "Saved the transcript to Apple Notes, but skipped the AI summary — "
+                    "set your Anthropic API key from the menu (Set API Key…).",
+                )
+                return
             log.info("Summarization complete, length: %d chars", len(summary))
 
             self._update_progress("Saving to Notes...", pct=0.95, detail="Almost done")
