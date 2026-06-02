@@ -8,10 +8,8 @@ NOTARY_PROFILE="${MS_NOTARY_PROFILE:-meetingscribe-notary}"
 REPO="${MS_REPO:-jacobWeeces/meetingscribe}"
 SPARKLE_DIR="build/sparkle"
 BUILD_ROOT="${MS_BUILD_ROOT:-/private/tmp/meetingscribe-release}"
-APP="$BUILD_ROOT/dist/MeetingScribe.app"
-ZIP="$BUILD_ROOT/dist/MeetingScribe-${VERSION}.zip"
 
-echo "==> 1/9 Fetch pinned Sparkle ($SPARKLE_VER)"
+echo "==> 1/4 Fetch pinned Sparkle ($SPARKLE_VER)"
 if [ ! -d "$SPARKLE_DIR/Sparkle.framework" ]; then
   mkdir -p "$SPARKLE_DIR"
   curl -L -o "$SPARKLE_DIR/sparkle.tar.xz" \
@@ -19,68 +17,73 @@ if [ ! -d "$SPARKLE_DIR/Sparkle.framework" ]; then
   tar xf "$SPARKLE_DIR/sparkle.tar.xz" -C "$SPARKLE_DIR"
 fi
 
-echo "==> 2/9 Build"
-rm -rf "$BUILD_ROOT"
-mkdir -p "$BUILD_ROOT"
-export MS_VERSION="$VERSION"
-python3 -m PyInstaller MeetingScribe.spec --noconfirm \
-  --distpath "$BUILD_ROOT/dist" --workpath "$BUILD_ROOT/build"
+# Build + sign + notarize + appcast one variant. Args:
+#   profile bundle_id feed_url zip_name appcast_name
+build_variant() {
+  local profile="$1" bundle_id="$2" feed_url="$3" zip_name="$4" appcast_name="$5"
+  local vroot="$BUILD_ROOT/$profile"
+  local app="$vroot/dist/MeetingScribe.app"
+  local zip="$vroot/dist/$zip_name"
+  local FW="$app/Contents/Frameworks/Sparkle.framework"
 
-echo "==> 3/9 Embed Sparkle.framework"
-mkdir -p "$APP/Contents/Frameworks"
-/usr/bin/ditto "$SPARKLE_DIR/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
-/usr/bin/xattr -cr "$APP/Contents/Frameworks/Sparkle.framework"
+  echo "==> [$profile] build (profile=$profile id=$bundle_id)"
+  rm -rf "$vroot"; mkdir -p "$vroot"
+  export MS_VERSION="$VERSION" MS_PROFILE="$profile" MS_BUNDLE_ID="$bundle_id" MS_FEED_URL="$feed_url"
+  python3 -m PyInstaller MeetingScribe.spec --noconfirm --distpath "$vroot/dist" --workpath "$vroot/build"
 
-echo "==> 4/9 Codesign inside-out"
-FW="$APP/Contents/Frameworks/Sparkle.framework"
-# Strip extended attributes (resource forks / Finder info) from the whole bundle;
-# codesign rejects them under hardened runtime ("...detritus not allowed").
-/usr/bin/xattr -cr "$APP"
-# (a) Sign nested Mach-O executables inside the framework first (main binary, Autoupdate,
-#     and the executables inside the XPC services / Updater.app).
-find "$FW/Versions" -type f -perm -111 \
-  -exec codesign -f -s "$SIGN_ID" -o runtime --timestamp {} +
-# (b) Sign the XPC service bundles and the Updater.app bundle.
-for nested in "$FW"/Versions/*/XPCServices/*.xpc "$FW"/Versions/*/Updater.app; do
-  [ -e "$nested" ] && codesign -f -s "$SIGN_ID" -o runtime --timestamp "$nested"
-done
-# (c) Sign the framework bundle itself.
-codesign -f -s "$SIGN_ID" -o runtime --timestamp "$FW"
-# (d) Sign the remaining app Mach-O (PyInstaller .so/.dylib), excluding the framework already signed.
-find "$APP" -path "$FW" -prune -o -type f \( -name "*.so" -o -name "*.dylib" \) -print0 \
-  | xargs -0 -r codesign -f -s "$SIGN_ID" -o runtime --timestamp
-# (d2) Sign the embedded Python.framework explicitly. Its main Mach-O ("Python") has no
-#      file extension, so the *.so/*.dylib sweep above misses it; notarization requires a
-#      Developer ID signature + secure timestamp on it.
-if [ -d "$APP/Contents/Frameworks/Python.framework" ]; then
-  for pybin in "$APP"/Contents/Frameworks/Python.framework/Versions/*/Python; do
-    [ -e "$pybin" ] && codesign -f -s "$SIGN_ID" -o runtime --timestamp "$pybin"
+  echo "==> [$profile] embed Sparkle.framework"
+  mkdir -p "$app/Contents/Frameworks"
+  /usr/bin/ditto "$SPARKLE_DIR/Sparkle.framework" "$FW"
+  /usr/bin/xattr -cr "$app"
+
+  echo "==> [$profile] codesign inside-out"
+  find "$FW/Versions" -type f -perm -111 \
+    -exec codesign -f -s "$SIGN_ID" -o runtime --timestamp {} +
+  for nested in "$FW"/Versions/*/XPCServices/*.xpc "$FW"/Versions/*/Updater.app; do
+    [ -e "$nested" ] && codesign -f -s "$SIGN_ID" -o runtime --timestamp "$nested"
   done
-  codesign -f -s "$SIGN_ID" -o runtime --timestamp "$APP/Contents/Frameworks/Python.framework"
-fi
-# (e) Sign the outer app bundle LAST (no --deep).
-codesign -f -s "$SIGN_ID" -o runtime --timestamp "$APP"
-codesign --verify --strict --verbose=2 "$APP"
+  codesign -f -s "$SIGN_ID" -o runtime --timestamp "$FW"
+  if [ -d "$app/Contents/Frameworks/Python.framework" ]; then
+    for pybin in "$app"/Contents/Frameworks/Python.framework/Versions/*/Python; do
+      [ -e "$pybin" ] && codesign -f -s "$SIGN_ID" -o runtime --timestamp "$pybin"
+    done
+    codesign -f -s "$SIGN_ID" -o runtime --timestamp "$app/Contents/Frameworks/Python.framework"
+  fi
+  find "$app" -path "$FW" -prune -o -type f \( -name "*.so" -o -name "*.dylib" \) -print0 \
+    | xargs -0 -r codesign -f -s "$SIGN_ID" -o runtime --timestamp
+  codesign -f -s "$SIGN_ID" -o runtime --timestamp "$app"
+  codesign --verify --strict --verbose=2 "$app"
 
-echo "==> 5/9 Notarize + staple"
-/usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
-xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
-xcrun stapler staple "$APP"
+  echo "==> [$profile] notarize + staple"
+  /usr/bin/ditto -c -k --keepParent "$app" "$zip"
+  xcrun notarytool submit "$zip" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$app"
+  rm -f "$zip"; /usr/bin/ditto -c -k --keepParent "$app" "$zip"
 
-echo "==> 6/9 Re-zip stapled app"
-rm -f "$ZIP"
-/usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
+  echo "==> [$profile] EdDSA-sign + appcast ($appcast_name)"
+  cp "$appcast_name" "$vroot/dist/appcast.xml" 2>/dev/null || true
+  "$SPARKLE_DIR/bin/generate_appcast" \
+    --download-url-prefix "https://github.com/${REPO}/releases/download/v${VERSION}/" \
+    "$vroot/dist/"
+  cp "$vroot/dist/appcast.xml" "$appcast_name"
+}
 
-echo "==> 7/9 + 8/9 EdDSA-sign + appcast"
-cp appcast.xml "$BUILD_ROOT/dist/appcast.xml" 2>/dev/null || true
-"$SPARKLE_DIR/bin/generate_appcast" \
-  --download-url-prefix "https://github.com/${REPO}/releases/download/v${VERSION}/" \
-  "$BUILD_ROOT/dist/"
-cp "$BUILD_ROOT/dist/appcast.xml" appcast.xml
+echo "==> 2/4 Build + sign + notarize BOTH variants (~10 min: two notarizations)"
+rm -rf "$BUILD_ROOT"
+build_variant "laurelle" "com.meetingscribe.app" \
+  "https://github.com/${REPO}/releases/latest/download/appcast.xml" \
+  "MeetingScribe-${VERSION}.zip" "appcast.xml"
+build_variant "jacob" "com.meetingscribe.jacob" \
+  "https://github.com/${REPO}/releases/latest/download/appcast-jacob.xml" \
+  "MeetingScribe-Jacob-${VERSION}.zip" "appcast-jacob.xml"
 
-echo "==> 9/9 Publish to GitHub Releases"
-gh release create "v${VERSION}" "$ZIP" appcast.xml \
-  --repo "$REPO" --title "MeetingScribe ${VERSION}" --notes "Release ${VERSION}" \
-  || gh release upload "v${VERSION}" "$ZIP" appcast.xml --repo "$REPO" --clobber
+echo "==> 3/4 Collect assets"
+LZIP="$BUILD_ROOT/laurelle/dist/MeetingScribe-${VERSION}.zip"
+JZIP="$BUILD_ROOT/jacob/dist/MeetingScribe-Jacob-${VERSION}.zip"
 
-echo "==> Done. appcast.xml regenerated; commit it after the release."
+echo "==> 4/4 Publish to GitHub Releases (both variants, one release)"
+gh release create "v${VERSION}" "$LZIP" "$JZIP" appcast.xml appcast-jacob.xml \
+  --repo "$REPO" --title "MeetingScribe ${VERSION}" --notes "Release ${VERSION} (Laurelle + Jacob)" \
+  || gh release upload "v${VERSION}" "$LZIP" "$JZIP" appcast.xml appcast-jacob.xml --repo "$REPO" --clobber
+
+echo "==> Done. Commit appcast.xml and appcast-jacob.xml after the release."
