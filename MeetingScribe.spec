@@ -2,6 +2,9 @@ import os
 import site
 
 _version = os.environ.get('MS_VERSION', '0.1.0')
+_profile = os.environ.get('MS_PROFILE', 'laurelle')
+_bundle_id = os.environ.get('MS_BUNDLE_ID', 'com.meetingscribe.app')
+_feed_url = os.environ.get('MS_FEED_URL', 'https://github.com/jacobWeeces/meetingscribe/releases/latest/download/appcast.xml')
 
 block_cipher = None
 
@@ -94,7 +97,7 @@ app = BUNDLE(
     coll,
     name='MeetingScribe.app',
     icon='assets/MeetingScribe.icns',
-    bundle_identifier='com.meetingscribe.app',
+    bundle_identifier=_bundle_id,
     info_plist={
         'LSUIElement': True,
         'CFBundleName': 'MeetingScribe',
@@ -102,7 +105,8 @@ app = BUNDLE(
         'CFBundleVersion': _version,
         'CFBundleShortVersionString': _version,
         'NSMicrophoneUsageDescription': 'MeetingScribe needs microphone access to record meetings.',
-        'SUFeedURL': 'https://github.com/jacobWeeces/meetingscribe/releases/latest/download/appcast.xml',
+        'SUFeedURL': _feed_url,
+        'MSUserProfile': _profile,
         'SUPublicEDKey': 'SP/964iRTWkRNR91DJNIpPBGrxIu1/IHSr+JnE6GkvA=',
         'SUEnableAutomaticChecks': True,
         'SUScheduledCheckInterval': 86400,
