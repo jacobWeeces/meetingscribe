@@ -10,7 +10,32 @@ SAMPLE_RATE = 44100
 CHANNELS = 1
 BLACKHOLE_DEVICE_NAME = "BlackHole"
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
-USER_PROFILE = "laurelle"
+
+
+def _load_profile():
+    """Resolve which prompt profile this build uses.
+
+    Frozen app: the MSUserProfile key baked into Info.plist by MeetingScribe.spec.
+    Dev: the $MS_PROFILE env var. Falls back to 'laurelle'; unknown values too.
+    """
+    profile = None
+    if getattr(sys, "frozen", False):
+        try:
+            from Foundation import NSBundle
+            v = NSBundle.mainBundle().objectForInfoDictionaryKey_("MSUserProfile")
+            if v:
+                profile = str(v)
+        except Exception:
+            profile = None
+    if not profile:
+        profile = os.environ.get("MS_PROFILE") or "laurelle"
+    from meetingscribe.prompts import PROFILES
+    if profile not in PROFILES:
+        profile = "laurelle"
+    return profile
+
+
+USER_PROFILE = _load_profile()
 
 
 def _load_api_key():
