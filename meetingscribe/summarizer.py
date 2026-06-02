@@ -2,12 +2,17 @@ import logging
 
 import anthropic
 
-from meetingscribe.config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL, USER_PROFILE
+from meetingscribe.config import ANTHROPIC_MODEL, USER_PROFILE
 from meetingscribe.prompts import PROFILES
+from meetingscribe.secrets import get_api_key
 
 log = logging.getLogger("meetingscribe")
 
 MAX_CHUNK_CHARS = 80000
+
+
+class NoAPIKeyError(RuntimeError):
+    """Raised when summarization is attempted without an Anthropic API key."""
 
 
 def _split_transcript(transcript, max_chars=MAX_CHUNK_CHARS):
@@ -33,12 +38,20 @@ def _split_transcript(transcript, max_chars=MAX_CHUNK_CHARS):
 
 class Summarizer:
     def __init__(self):
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        self._client = None
         self._prompts = PROFILES[USER_PROFILE]
         log.info("Summarizer using profile: %s", USER_PROFILE)
 
+    def _ensure_client(self):
+        if self._client is None:
+            key = get_api_key()
+            if not key:
+                raise NoAPIKeyError("No Anthropic API key configured")
+            self._client = anthropic.Anthropic(api_key=key)
+        return self._client
+
     def _call(self, system, user_content):
-        message = self._client.messages.create(
+        message = self._ensure_client().messages.create(
             model=ANTHROPIC_MODEL,
             max_tokens=4096,
             system=system,
