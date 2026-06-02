@@ -42,6 +42,17 @@ def _is_already_running():
     return False
 
 
+def _app_version():
+    """Return the app's short version string from the bundle Info.plist ('dev' from source)."""
+    try:
+        v = AppKit.NSBundle.mainBundle().objectForInfoDictionaryKey_("CFBundleShortVersionString")
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    return "dev"
+
+
 def _bring_to_front():
     """Bring this LSUIElement (background) app's windows to the foreground.
 
@@ -103,6 +114,8 @@ class MeetingScribeApp(rumps.App):
     def __init__(self):
         super().__init__(ICON_IDLE, quit_button=None)
         self.menu = [
+            rumps.MenuItem(f"MeetingScribe v{_app_version()}"),  # no callback = disabled label
+            None,
             rumps.MenuItem("Start Recording", callback=self.toggle_recording),
             None,
             rumps.MenuItem("Set API Key…", callback=self.set_api_key_clicked),
