@@ -10,3 +10,4 @@ whisper_model/
 .worktrees/
 *.zip
 assets/MeetingScribe.iconset/
+release-*.log
