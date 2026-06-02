@@ -3,6 +3,14 @@
     <channel>
         <title>MeetingScribe</title>
         <item>
+            <title>0.3.0</title>
+            <pubDate>Tue, 02 Jun 2026 14:40:14 -0500</pubDate>
+            <sparkle:version>0.3.0</sparkle:version>
+            <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.13</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/jacobWeeces/meetingscribe/releases/download/v0.3.0/MeetingScribe-0.3.0.zip" length="1510572651" type="application/octet-stream" sparkle:edSignature="73lIUI4uIK/yhaa+q2WiETgs0NYRPferDI4x289cinCSmWYFU0VZYw55ltGH1LocQc3IuakM6RC92NXgdfHhBQ=="/>
+        </item>
+        <item>
             <title>0.2.0</title>
             <pubDate>Tue, 02 Jun 2026 13:13:02 -0500</pubDate>
             <sparkle:version>0.2.0</sparkle:version>
