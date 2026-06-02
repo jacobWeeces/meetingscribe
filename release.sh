@@ -20,7 +20,8 @@ fi
 
 echo "==> 2/9 Build"
 rm -rf build/MeetingScribe dist
-MS_VERSION="$VERSION" python3 -m PyInstaller MeetingScribe.spec --noconfirm
+export MS_VERSION="$VERSION"
+python3 -m PyInstaller MeetingScribe.spec --noconfirm
 
 echo "==> 3/9 Embed Sparkle.framework"
 mkdir -p "$APP/Contents/Frameworks"
@@ -28,15 +29,21 @@ cp -R "$SPARKLE_DIR/Sparkle.framework" "$APP/Contents/Frameworks/"
 
 echo "==> 4/9 Codesign inside-out"
 FW="$APP/Contents/Frameworks/Sparkle.framework"
-# Sign every nested Mach-O first (XPC services, helper apps, dylibs), then framework, then app.
-find "$FW" -type f \( -name "*.dylib" -o -name "Autoupdate" -o -name "*.xpc" -o -perm -111 \) \
-  -exec codesign -f -s "$SIGN_ID" -o runtime --timestamp {} + 2>/dev/null || true
-find "$FW" -name "*.xpc" -type d -exec codesign -f -s "$SIGN_ID" -o runtime --timestamp {} + 2>/dev/null || true
-find "$FW" -name "*.app" -type d -exec codesign -f -s "$SIGN_ID" -o runtime --timestamp {} + 2>/dev/null || true
+# (a) Sign nested Mach-O executables inside the framework first (main binary, Autoupdate,
+#     and the executables inside the XPC services / Updater.app).
+find "$FW/Versions" -type f -perm -111 \
+  -exec codesign -f -s "$SIGN_ID" -o runtime --timestamp {} +
+# (b) Sign the XPC service bundles and the Updater.app bundle.
+for nested in "$FW"/Versions/*/XPCServices/*.xpc "$FW"/Versions/*/Updater.app; do
+  [ -e "$nested" ] && codesign -f -s "$SIGN_ID" -o runtime --timestamp "$nested"
+done
+# (c) Sign the framework bundle itself.
 codesign -f -s "$SIGN_ID" -o runtime --timestamp "$FW"
-find "$APP" -type f \( -name "*.dylib" -o -name "*.so" \) \
-  -exec codesign -f -s "$SIGN_ID" -o runtime --timestamp {} + 2>/dev/null || true
-codesign -f -s "$SIGN_ID" -o runtime --timestamp --deep "$APP"
+# (d) Sign the remaining app Mach-O (PyInstaller .so/.dylib), excluding the framework already signed.
+find "$APP" -path "$FW" -prune -o -type f \( -name "*.so" -o -name "*.dylib" \) -print0 \
+  | xargs -0 -r codesign -f -s "$SIGN_ID" -o runtime --timestamp
+# (e) Sign the outer app bundle LAST (no --deep).
+codesign -f -s "$SIGN_ID" -o runtime --timestamp "$APP"
 codesign --verify --strict --verbose=2 "$APP"
 
 echo "==> 5/9 Notarize + staple"
