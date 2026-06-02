@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>MeetingScribe</title>
+        <item>
+            <title>0.4.0</title>
+            <pubDate>Tue, 02 Jun 2026 15:26:57 -0500</pubDate>
+            <sparkle:version>0.4.0</sparkle:version>
+            <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.13</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/jacobWeeces/meetingscribe/releases/download/v0.4.0/MeetingScribe-Jacob-0.4.0.zip" length="1510575410" type="application/octet-stream" sparkle:edSignature="mPxiitM3+r/fWvwvsM8yW2z437rc2zbmBu8PInrg1XT28/euYe8W1ZmRIMFD3p33oJJuVbvy9T2udoqKexHDBQ=="/>
+        </item>
+    </channel>
+</rss>
