@@ -50,16 +50,16 @@ class AudioRecorder:
         Mic-only when there's no system stream. Clipped to the shorter of the two
         streams, matching how stop() aligns them. Safe to call while recording.
         """
-        # Read the frame lists under the lock and concatenate here: np.concatenate
-        # allocates a fresh array, so the snapshot is fully detached from the live
-        # buffers once the lock is released (callbacks only ever append new blocks).
+        # Copy the frame-list references under the lock (cheap O(n) pointer copy), then
+        # concatenate OUTSIDE the lock. The callbacks only ever append new blocks, so the
+        # copied references stay valid; this avoids stalling the capture callbacks (xruns)
+        # behind a multi-millisecond concatenate on a long meeting.
         with self._lock:
-            mic = (
-                np.concatenate(self._mic_frames)
-                if self._mic_frames
-                else np.zeros((0, 1), dtype="float32")
-            )
-            sys = np.concatenate(self._sys_frames) if self._sys_frames else None
+            mic_blocks = list(self._mic_frames)
+            sys_blocks = list(self._sys_frames) if self._sys_frames else None
+
+        mic = np.concatenate(mic_blocks) if mic_blocks else np.zeros((0, 1), dtype="float32")
+        sys = np.concatenate(sys_blocks) if sys_blocks else None
 
         mic = mic[:, 0] if mic.ndim > 1 else mic
         if sys is not None and len(sys) > 0:

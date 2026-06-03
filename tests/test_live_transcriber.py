@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 from meetingscribe.live_transcriber import LiveTranscriber, resolve_transcript
 
@@ -149,3 +150,29 @@ def test_resolve_fires_progress_complete_on_live():
     )
     assert out == "live text"
     assert seen == [1.0]
+
+
+def test_finalize_propagates_transcriber_error():
+    class Boom:
+        def transcribe_segments(self, source):
+            raise RuntimeError("whisper blew up on the tail")
+
+    lt = LiveTranscriber(Boom(), sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    with pytest.raises(RuntimeError):
+        lt.finalize(_tail(5))
+
+
+def test_resolve_falls_back_to_whole_file_when_finalize_raises():
+    class Boom:
+        def transcribe_segments(self, source):
+            raise RuntimeError("whisper blew up on the tail")
+
+        def transcribe(self, wav_path, on_progress=None):
+            return "FULL-FILE"
+
+    boom = Boom()
+    lt = LiveTranscriber(boom, sample_rate=SR)
+    lt._committed = ["partial live text"]   # simulate one good tick before the failure
+    lt._ever_committed = True
+    out = resolve_transcript(boom, lt, _tail(5), "/tmp/x.wav")
+    assert out == "FULL-FILE"               # fell back, not the partial

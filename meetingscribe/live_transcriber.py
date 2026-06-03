@@ -71,28 +71,36 @@ class LiveTranscriber:
     def finalize(self, tail) -> str:
         """Commit any remaining tail with no guard (end of meeting); return the full text.
 
+        Unlike process_tick (which swallows a per-tick error and retries next tick), this
+        lets a transcription error PROPAGATE so the caller (resolve_transcript) can fall
+        back to the whole-file pass — keeping the result never worse than today.
+
         `tail` must be the audio starting at `committed_sample`
         (`AudioRecorder.snapshot_mono(self.committed_sample)`), or None/empty if there is
         nothing left.
         """
         if tail is not None and len(tail) > 0:
-            try:
-                for start, end, text in self._transcriber.transcribe_segments(tail):
-                    cleaned = text.strip()
-                    if cleaned:
-                        self._committed.append(cleaned)
-                        self._ever_committed = True
-            except Exception:
-                log.exception("live: finalize tail transcription failed")
+            # Materialize before appending (like process_tick) so a mid-iteration error
+            # raises before we touch _committed — finalize stays all-or-nothing.
+            for start, end, text in list(self._transcriber.transcribe_segments(tail)):
+                cleaned = text.strip()
+                if cleaned:
+                    self._committed.append(cleaned)
+                    self._ever_committed = True
         return self.text()
 
 
 def resolve_transcript(transcriber, live, final_tail, wav_path, on_progress=None):
     """Decide the final transcript: the live one if it ran and produced text, else
-    today's whole-WAV pass (the safety net — never worse than today)."""
+    today's whole-WAV pass (the safety net — never worse than today). If the live
+    finalize() fails, fall back to the whole-WAV pass rather than returning a partial."""
     if live is not None and live.ever_committed:
-        transcript = live.finalize(final_tail)
-        if on_progress:
-            on_progress(1.0)  # live path has no incremental progress; jump the bar to done
-        return transcript
+        try:
+            transcript = live.finalize(final_tail)
+        except Exception:
+            log.exception("live: finalize failed; falling back to whole-file transcription")
+        else:
+            if on_progress:
+                on_progress(1.0)  # live path has no incremental progress; jump the bar to done
+            return transcript
     return transcriber.transcribe(wav_path, on_progress=on_progress)
