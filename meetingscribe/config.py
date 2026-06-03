@@ -11,6 +11,12 @@ CHANNELS = 1
 BLACKHOLE_DEVICE_NAME = "BlackHole"
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
+# --- Live (during-meeting) transcription ---
+LIVE_TRANSCRIPTION = True      # default when no per-user setting is stored yet
+LIVE_CADENCE_SEC = 25          # worker wakes this often to transcribe the new tail
+LIVE_GUARD_SEC = 3             # trailing audio never committed yet (may be mid-word)
+LIVE_MAX_TAIL_SEC = 90         # safety cap: force-commit if no silence boundary appears
+
 
 def _load_profile():
     """Resolve which prompt profile this build uses.
