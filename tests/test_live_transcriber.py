@@ -1,0 +1,137 @@
+import numpy as np
+from meetingscribe.live_transcriber import LiveTranscriber, resolve_transcript
+
+SR = 100  # tiny sample rate keeps the math readable
+
+
+class FakeTranscriber:
+    """Returns a scripted list of (start, end, text) per call, ignoring the audio."""
+    def __init__(self, scripts):
+        self._scripts = list(scripts)
+        self.calls = []
+
+    def transcribe_segments(self, source):
+        self.calls.append(source)
+        return self._scripts.pop(0) if self._scripts else []
+
+    def transcribe(self, wav_path, on_progress=None):
+        return "FULL-FILE"
+
+
+def _tail(seconds, sr=SR):
+    return np.zeros(int(seconds * sr), dtype="float32")
+
+
+def test_commits_segments_before_horizon_holds_the_rest():
+    # tail = 20 s, guard = 3 -> horizon = 17. Seg A ends at 10 (commit),
+    # Seg B ends at 19 (held, inside guard).
+    fake = FakeTranscriber([[(0.0, 10.0, "alpha"), (10.0, 19.0, "beta")]])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    lt.process_tick(_tail(20))
+    assert lt.text() == "alpha"
+    assert lt.committed_sample == int(10.0 * SR)
+    assert lt.ever_committed is True
+
+
+def test_short_tail_commits_nothing():
+    fake = FakeTranscriber([[(0.0, 1.0, "hi")]])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    lt.process_tick(_tail(4))  # < guard + 2
+    assert lt.text() == ""
+    assert lt.committed_sample == 0
+    assert lt.ever_committed is False
+    assert fake.calls == []  # didn't even bother transcribing
+
+
+def test_no_duplicate_text_across_ticks():
+    # Tick 1: tail 20 s -> commit "alpha" (ends 10), advance to sample 1000.
+    # Tick 2: a fresh 15 s tail (audio from sample 1000 on) -> commit "gamma" (ends 9).
+    fake = FakeTranscriber([
+        [(0.0, 10.0, "alpha"), (10.0, 19.0, "beta")],
+        [(0.0, 9.0, "gamma"), (9.0, 14.0, "delta")],
+    ])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    lt.process_tick(_tail(20))
+    lt.process_tick(_tail(15))
+    assert lt.text() == "alpha\ngamma"          # no "beta" duplication
+    assert lt.committed_sample == int(10.0 * SR) + int(9.0 * SR)
+
+
+def test_max_tail_cap_force_commits():
+    # tail 95 s (> max 90), single long segment ending at 94 (> horizon 92) -> force commit.
+    fake = FakeTranscriber([[(0.0, 94.0, "monologue")]])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    lt.process_tick(_tail(95))
+    assert lt.text() == "monologue"
+    assert lt.committed_sample == int(94.0 * SR)
+
+
+def test_finalize_flushes_remaining_tail_with_no_guard():
+    fake = FakeTranscriber([
+        [(0.0, 10.0, "alpha"), (10.0, 19.0, "beta")],   # tick commits alpha
+        [(0.0, 4.0, "omega")],                          # finalize commits everything
+    ])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    lt.process_tick(_tail(20))
+    result = lt.finalize(_tail(5))
+    assert result == "alpha\nomega"
+
+
+def test_finalize_with_empty_tail_returns_committed():
+    fake = FakeTranscriber([[(0.0, 10.0, "alpha")]])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    lt.process_tick(_tail(20))
+    assert lt.finalize(np.zeros(0, dtype="float32")) == "alpha"
+
+
+def test_resolve_uses_live_when_committed():
+    fake = FakeTranscriber([])
+    lt = LiveTranscriber(fake, sample_rate=SR)
+    lt._committed = ["live text"]
+    lt._ever_committed = True
+    out = resolve_transcript(fake, lt, np.zeros(0, dtype="float32"), "/tmp/x.wav")
+    assert out == "live text"
+
+
+def test_resolve_falls_back_to_whole_file_when_live_none():
+    fake = FakeTranscriber([])
+    out = resolve_transcript(fake, None, None, "/tmp/x.wav")
+    assert out == "FULL-FILE"
+
+
+def test_resolve_falls_back_when_live_never_committed():
+    fake = FakeTranscriber([])
+    lt = LiveTranscriber(fake, sample_rate=SR)  # nothing committed
+    out = resolve_transcript(fake, lt, None, "/tmp/x.wav")
+    assert out == "FULL-FILE"
+
+
+def test_segment_ending_exactly_at_horizon_commits():
+    # horizon = 20 - 3 = 17; a segment ending exactly at 17 must commit (<= boundary).
+    fake = FakeTranscriber([[(0.0, 17.0, "edge"), (17.0, 19.0, "after")]])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    lt.process_tick(_tail(20))
+    assert lt.text() == "edge"
+    assert lt.committed_sample == int(17.0 * SR)
+
+
+def test_all_segments_inside_guard_is_a_noop():
+    # every segment is past the horizon (17) -> nothing commits, no advance.
+    fake = FakeTranscriber([[(17.5, 18.0, "late"), (18.0, 19.0, "later")]])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    lt.process_tick(_tail(20))
+    assert lt.text() == ""
+    assert lt.committed_sample == 0
+    assert lt.ever_committed is False
+
+
+def test_tick_exception_leaves_state_unchanged():
+    class Boom:
+        def transcribe_segments(self, source):
+            raise RuntimeError("whisper blew up")
+
+    lt = LiveTranscriber(Boom(), sample_rate=SR, guard_sec=3, max_tail_sec=90)
+    lt.process_tick(_tail(20))  # must not raise
+    assert lt.text() == ""
+    assert lt.committed_sample == 0
+    assert lt.ever_committed is False
