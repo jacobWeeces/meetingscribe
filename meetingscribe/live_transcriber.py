@@ -91,5 +91,8 @@ def resolve_transcript(transcriber, live, final_tail, wav_path, on_progress=None
     """Decide the final transcript: the live one if it ran and produced text, else
     today's whole-WAV pass (the safety net — never worse than today)."""
     if live is not None and live.ever_committed:
-        return live.finalize(final_tail)
+        transcript = live.finalize(final_tail)
+        if on_progress:
+            on_progress(1.0)  # live path has no incremental progress; jump the bar to done
+        return transcript
     return transcriber.transcribe(wav_path, on_progress=on_progress)

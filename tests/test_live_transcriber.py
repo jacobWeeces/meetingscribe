@@ -135,3 +135,17 @@ def test_tick_exception_leaves_state_unchanged():
     assert lt.text() == ""
     assert lt.committed_sample == 0
     assert lt.ever_committed is False
+
+
+def test_resolve_fires_progress_complete_on_live():
+    fake = FakeTranscriber([])
+    lt = LiveTranscriber(fake, sample_rate=SR)
+    lt._committed = ["live text"]
+    lt._ever_committed = True
+    seen = []
+    out = resolve_transcript(
+        fake, lt, np.zeros(0, dtype="float32"), "/tmp/x.wav",
+        on_progress=lambda p: seen.append(p),
+    )
+    assert out == "live text"
+    assert seen == [1.0]

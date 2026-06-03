@@ -10,7 +10,9 @@ import AppKit
 import objc
 import rumps
 
-from meetingscribe.config import DATA_DIR, ensure_dirs
+from meetingscribe.config import DATA_DIR, ensure_dirs, SAMPLE_RATE, LIVE_CADENCE_SEC
+from meetingscribe.live_transcriber import LiveTranscriber, resolve_transcript
+from meetingscribe import settings
 from meetingscribe.recorder import AudioRecorder, find_blackhole_device
 from meetingscribe.transcriber import Transcriber
 from meetingscribe.summarizer import Summarizer
@@ -113,11 +115,14 @@ def prompt_for_api_key():
 class MeetingScribeApp(rumps.App):
     def __init__(self):
         super().__init__(ICON_IDLE, quit_button=None)
+        live_item = rumps.MenuItem("Live transcription", callback=self.toggle_live_transcription)
+        live_item.state = 1 if settings.live_transcription_enabled() else 0
         self.menu = [
-            rumps.MenuItem(f"MeetingScribe v{_app_version()}"),  # no callback = disabled label
+            rumps.MenuItem(f"MeetingScribe v{_app_version()}"),
             None,
             rumps.MenuItem("Start Recording", callback=self.toggle_recording),
             None,
+            live_item,
             rumps.MenuItem("Set API Key…", callback=self.set_api_key_clicked),
             rumps.MenuItem("Check for Updates…", callback=check_for_updates),
             None,
@@ -131,6 +136,8 @@ class MeetingScribeApp(rumps.App):
         self._start_time = None
         self._timer_thread = None
         self._progress_window = None
+        self._live = None
+        self._live_worker_thread = None
 
         log.info("MeetingScribe started (pid %d)", os.getpid())
         log.info("BlackHole device: %s", find_blackhole_device())
@@ -156,6 +163,11 @@ class MeetingScribeApp(rumps.App):
     def set_api_key_clicked(self, _sender):
         prompt_for_api_key()
 
+    def toggle_live_transcription(self, sender):
+        sender.state = 0 if sender.state else 1
+        settings.set_live_transcription(bool(sender.state))
+        log.info("Live transcription set to %s (applies to next recording)", bool(sender.state))
+
     def toggle_recording(self, sender):
         if self._processing:
             rumps.alert("MeetingScribe", "Still processing the last recording. Please wait.")
@@ -177,6 +189,15 @@ class MeetingScribeApp(rumps.App):
         self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
         self._timer_thread.start()
 
+        if settings.live_transcription_enabled():
+            self._live = LiveTranscriber(self._transcriber, SAMPLE_RATE)
+            self._live_worker_thread = threading.Thread(target=self._live_worker, daemon=True)
+            self._live_worker_thread.start()
+            log.info("Live transcription worker started")
+        else:
+            self._live = None
+            self._live_worker_thread = None
+
     def _update_timer(self):
         while self._recording:
             elapsed = int(time.time() - self._start_time)
@@ -187,6 +208,29 @@ class MeetingScribeApp(rumps.App):
             else:
                 self.title = f"{ICON_RECORDING} {mins}:{secs:02d}"
             time.sleep(1)
+
+    def _live_worker(self):
+        try:
+            self._transcriber._load_model()   # preload so the first tick & Stop never stall cold
+        except Exception:
+            log.exception("live: model preload failed; disabling live for this session")
+            self._live = None
+            return
+        while self._recording:
+            for _ in range(LIVE_CADENCE_SEC):
+                if not self._recording:
+                    break
+                time.sleep(1)
+            if not self._recording:
+                break
+            live = self._live
+            if live is None:
+                break
+            try:
+                tail = self._recorder.snapshot_mono(live.committed_sample)
+                live.process_tick(tail)
+            except Exception:
+                log.exception("live: worker tick failed")
 
     def _show_progress(self):
         self._progress_window = ProgressWindow()
@@ -229,12 +273,28 @@ class MeetingScribeApp(rumps.App):
     def _finish(self, title, message):
         self.title = ICON_IDLE
         self._processing = False
+        self._live = None  # release the finished session's transcript text
         self._close_progress()
         notify(title, message)
         _main_thread_alert(f"MeetingScribe — {title}", message)
 
     def _process_recording(self, wav_path):
         try:
+            # The live worker shares self._transcriber's single Whisper model, so it must
+            # be fully stopped before we transcribe here. Join it (no timeout) on this
+            # background thread: the menu-bar UI stays responsive and the model is never
+            # used by two threads at once. The worker exits on its own now that
+            # self._recording is False (after finishing any in-flight tick).
+            if self._live_worker_thread is not None:
+                self._live_worker_thread.join()
+                self._live_worker_thread = None
+            live = self._live
+            # snapshot_mono is valid after recorder.stop(): stop() concatenates the frame
+            # lists but does not clear them.
+            final_tail = (
+                self._recorder.snapshot_mono(live.committed_sample) if live is not None else None
+            )
+
             self._update_progress("Loading model...", detail="First time takes a moment")
             self._transcriber._load_model()
 
@@ -247,7 +307,13 @@ class MeetingScribeApp(rumps.App):
                     detail=f"{int(pct * 100)}% complete",
                 )
 
-            transcript = self._transcriber.transcribe(wav_path, on_progress=on_transcribe_progress)
+            transcript = resolve_transcript(
+                self._transcriber,
+                live,
+                final_tail,
+                wav_path,
+                on_progress=on_transcribe_progress,
+            )
             log.info("Transcription complete, length: %d chars", len(transcript))
 
             if not transcript.strip():
