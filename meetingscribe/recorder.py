@@ -44,6 +44,32 @@ class AudioRecorder:
         with self._lock:
             self._sys_frames.append(indata.copy())
 
+    def snapshot_mono(self, start_sample: int = 0) -> np.ndarray:
+        """Mono mix (mic + sys)/2 of everything captured so far, from start_sample on.
+
+        Mic-only when there's no system stream. Clipped to the shorter of the two
+        streams, matching how stop() aligns them. Safe to call while recording.
+        """
+        # Read the frame lists under the lock and concatenate here: np.concatenate
+        # allocates a fresh array, so the snapshot is fully detached from the live
+        # buffers once the lock is released (callbacks only ever append new blocks).
+        with self._lock:
+            mic = (
+                np.concatenate(self._mic_frames)
+                if self._mic_frames
+                else np.zeros((0, 1), dtype="float32")
+            )
+            sys = np.concatenate(self._sys_frames) if self._sys_frames else None
+
+        mic = mic[:, 0] if mic.ndim > 1 else mic
+        if sys is not None and len(sys) > 0:
+            sys = sys[:, 0] if sys.ndim > 1 else sys
+            n = min(len(mic), len(sys))
+            mono = (mic[:n] + sys[:n]) / 2.0
+        else:
+            mono = mic
+        return mono[start_sample:].astype("float32")
+
     def start(self):
         ensure_dirs()
         self._mic_frames = []
