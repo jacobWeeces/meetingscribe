@@ -1,7 +1,7 @@
 # Design — Live (During-Meeting) Transcription
 
 **Date:** 2026-06-03
-**Status:** Brainstorm complete & validated. Pending implementation plan.
+**Status:** Implemented & reviewed (per-task + whole-feature integration review). 49 unit tests + 1 opt-in parity test passing. Manual smoke test pending.
 **Author:** Jacob
 
 ---
