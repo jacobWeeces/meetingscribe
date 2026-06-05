@@ -44,11 +44,13 @@ USER_PROFILE = _load_profile()
 
 
 def _load_api_key():
-    """Read the Anthropic key from $ANTHROPIC_API_KEY or a gitignored .env.
+    """Dev-machine convenience fallback for secrets.get_api_key(): read the Anthropic
+    key from $ANTHROPIC_API_KEY or a gitignored .env.
 
     Kept out of source so the key never enters git history. For local dev, put
-    `ANTHROPIC_API_KEY=...` in a `.env` at the project root. Frozen builds read a
-    `.env` bundled beside the app resources (see datas in MeetingScribe.spec).
+    `ANTHROPIC_API_KEY=...` in a `.env` at the project root. Frozen/production builds
+    resolve the key from the macOS Keychain via secrets.get_api_key(); no `.env` is
+    bundled with the app (MeetingScribe.spec ships none).
     """
     key = os.environ.get("ANTHROPIC_API_KEY")
     if key:
