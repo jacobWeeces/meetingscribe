@@ -245,6 +245,7 @@ class MeetingScribeApp(rumps.App):
     # ------------------------------------------------------------------
 
     def toggle_recording(self, sender):
+        log.info("toggle_recording: recording=%s processing=%s", self._recording, self._processing)
         if self._processing:
             rumps.alert("MeetingScribe", "Still processing the last recording. Please wait.")
             return
@@ -298,34 +299,50 @@ class MeetingScribeApp(rumps.App):
             | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
         )
 
-        if alert.runModal() == AppKit.NSAlertFirstButtonReturn:
-            self.toggle_recording(self.menu["Start Recording"])
+        ret = alert.runModal()
+        log.info("auto-detect: prompt closed (ret=%s, first-button=%s)", ret, AppKit.NSAlertFirstButtonReturn)
+        if ret == AppKit.NSAlertFirstButtonReturn:
+            # Defer the start out of this modal-completion context. Starting capture
+            # here runs a nested run loop (ScreenCaptureKit handler pump) *inside* the
+            # just-dismissed NSAlert, where it doesn't reliably proceed; a fresh
+            # AppHelper.callAfter turn behaves like the normal menu-click path.
+            from PyObjCTools import AppHelper
+            log.info("auto-detect: Start chosen; scheduling _start_recording")
+            AppHelper.callAfter(self.toggle_recording, self.menu["Start Recording"])
 
     # ------------------------------------------------------------------
     # Recording start / stop
     # ------------------------------------------------------------------
 
     def _start_recording(self, sender):
-        self._recorder = AudioRecorder()
-        self._recorder.start()
-        self._recording = True
-        self._start_time = time.time()
-        sender.title = "Stop Recording"
-        self.title = ICON_RECORDING
-        log.info("Recording started")
+        log.info("_start_recording: entered")
+        try:
+            self._recorder = AudioRecorder()
+            _t0 = time.time()
+            self._recorder.start()
+            log.info("_start_recording: recorder.start() in %.2fs (system_available=%s)",
+                     time.time() - _t0, self._recorder.system_available())
+            self._recording = True
+            self._start_time = time.time()
+            sender.title = "Stop Recording"
+            self.title = ICON_RECORDING
+            log.info("Recording started")
 
-        self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
-        self._timer_thread.start()
+            self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
+            self._timer_thread.start()
 
-        if settings.live_transcription_enabled():
-            self._live_local = LiveTranscriber(self._transcriber, SAMPLE_RATE, side="local")
-            remote_rate = self._recorder.remote_rate() if self._recorder.system_available() else 48000
-            self._live_remote = LiveTranscriber(self._transcriber, remote_rate, side="remote")
-            self._live_worker_thread = threading.Thread(target=self._live_worker, daemon=True)
-            self._live_worker_thread.start()
-            log.info("Live transcription workers started (per-channel)")
-        else:
-            self._live_local = self._live_remote = self._live_worker_thread = None
+            if settings.live_transcription_enabled():
+                self._live_local = LiveTranscriber(self._transcriber, SAMPLE_RATE, side="local")
+                remote_rate = self._recorder.remote_rate() if self._recorder.system_available() else 48000
+                self._live_remote = LiveTranscriber(self._transcriber, remote_rate, side="remote")
+                self._live_worker_thread = threading.Thread(target=self._live_worker, daemon=True)
+                self._live_worker_thread.start()
+                log.info("Live transcription workers started (per-channel)")
+            else:
+                self._live_local = self._live_remote = self._live_worker_thread = None
+        except Exception:
+            log.exception("_start_recording FAILED")
+            raise
 
     def _update_timer(self):
         while self._recording:
