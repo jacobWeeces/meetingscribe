@@ -7,6 +7,8 @@ from scipy.io import wavfile
 from faster_whisper import WhisperModel
 
 from meetingscribe.config import WHISPER_COMPUTE_TYPE, whisper_model_path, SAMPLE_RATE
+from meetingscribe.audio_format import resample_to_16k
+from meetingscribe.segments import merge_segments
 
 log = logging.getLogger("meetingscribe")
 
@@ -73,3 +75,29 @@ class Transcriber:
                     pass
         segments, _ = self._model.transcribe(str(source), beam_size=5, vad_filter=True)
         return [(s.start, s.end, s.text) for s in segments]
+
+    def transcribe_streams(self, local, local_rate, remote, remote_rate, on_progress=None) -> list[dict]:
+        """Transcribe local + remote streams separately, merge into one
+        side-attributed, timestamp-ordered segment list ({start,end,text,side,id})."""
+        self._load_model()
+        streams = [("local", local, local_rate), ("remote", remote, remote_rate)]
+        def _dur(arr, rate):
+            return arr.size / rate if rate > 0 and arr.size > 0 else 0.0
+        total_dur = sum(_dur(a, r) for _, a, r in streams)
+        elapsed, local_segs, remote_segs = 0.0, [], []
+        for side, arr, rate in streams:
+            if arr.size == 0:
+                if on_progress and total_dur > 0:
+                    on_progress(min(elapsed / total_dur, 1.0))
+                continue
+            arr16 = resample_to_16k(arr, rate)
+            raw, _info = self._model.transcribe(arr16, beam_size=5, vad_filter=True)
+            segs = [{"start": s.start, "end": s.end, "text": s.text.strip(), "side": side} for s in raw]
+            if side == "local":
+                local_segs = segs
+            else:
+                remote_segs = segs
+            elapsed += _dur(arr, rate)
+            if on_progress and total_dur > 0:
+                on_progress(min(elapsed / total_dur, 1.0))
+        return merge_segments(local_segs, remote_segs)
