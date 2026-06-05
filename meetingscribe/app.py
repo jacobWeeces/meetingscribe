@@ -13,7 +13,7 @@ import rumps
 from meetingscribe.config import DATA_DIR, ensure_dirs, SAMPLE_RATE, LIVE_CADENCE_SEC
 from meetingscribe.live_transcriber import LiveTranscriber, resolve_transcript
 from meetingscribe import settings
-from meetingscribe.recorder import AudioRecorder, find_blackhole_device
+from meetingscribe.recorder import AudioRecorder
 from meetingscribe.transcriber import Transcriber
 from meetingscribe.summarizer import Summarizer
 from meetingscribe.notes import save_to_notes
@@ -140,20 +140,6 @@ class MeetingScribeApp(rumps.App):
         self._live_worker_thread = None
 
         log.info("MeetingScribe started (pid %d)", os.getpid())
-        log.info("BlackHole device: %s", find_blackhole_device())
-
-        if find_blackhole_device() is None:
-            rumps.alert(
-                title="MeetingScribe — BlackHole Not Found",
-                message=(
-                    "BlackHole audio driver is not installed or not active.\n"
-                    "System audio capture will be unavailable — mic only.\n\n"
-                    "Install with: brew install blackhole-2ch\n"
-                    "Then set BlackHole as your system audio output or "
-                    "create a Multi-Output Device in Audio MIDI Setup.\n\n"
-                    "You may need to restart after installing."
-                ),
-            )
 
         if not get_api_key():
             prompt_for_api_key()
