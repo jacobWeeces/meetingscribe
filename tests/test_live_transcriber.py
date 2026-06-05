@@ -11,7 +11,7 @@ class FakeTranscriber:
         self._scripts = list(scripts)
         self.calls = []
 
-    def transcribe_segments(self, source):
+    def transcribe_segments(self, source, sample_rate=None):
         self.calls.append(source)
         return self._scripts.pop(0) if self._scripts else []
 
@@ -128,7 +128,7 @@ def test_all_segments_inside_guard_is_a_noop():
 
 def test_tick_exception_leaves_state_unchanged():
     class Boom:
-        def transcribe_segments(self, source):
+        def transcribe_segments(self, source, sample_rate=None):
             raise RuntimeError("whisper blew up")
 
     lt = LiveTranscriber(Boom(), sample_rate=SR, guard_sec=3, max_tail_sec=90)
@@ -154,7 +154,7 @@ def test_resolve_fires_progress_complete_on_live():
 
 def test_finalize_propagates_transcriber_error():
     class Boom:
-        def transcribe_segments(self, source):
+        def transcribe_segments(self, source, sample_rate=None):
             raise RuntimeError("whisper blew up on the tail")
 
     lt = LiveTranscriber(Boom(), sample_rate=SR, guard_sec=3, max_tail_sec=90)
@@ -164,7 +164,7 @@ def test_finalize_propagates_transcriber_error():
 
 def test_resolve_falls_back_to_whole_file_when_finalize_raises():
     class Boom:
-        def transcribe_segments(self, source):
+        def transcribe_segments(self, source, sample_rate=None):
             raise RuntimeError("whisper blew up on the tail")
 
         def transcribe(self, wav_path, on_progress=None):
@@ -176,3 +176,33 @@ def test_resolve_falls_back_to_whole_file_when_finalize_raises():
     lt._ever_committed = True
     out = resolve_transcript(boom, lt, _tail(5), "/tmp/x.wav")
     assert out == "FULL-FILE"               # fell back, not the partial
+
+
+def test_committed_segments_have_absolute_times_and_side():
+    fake = FakeTranscriber([[(0.0, 10.0, "alpha"), (10.0, 19.0, "beta")]])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90, side="remote")
+    lt.process_tick(_tail(20))                       # commits "alpha" (ends 10)
+    segs = lt.committed_segments()
+    assert len(segs) == 1
+    assert segs[0]["text"] == "alpha" and segs[0]["side"] == "remote"
+    assert segs[0]["start"] == 0.0 and segs[0]["end"] == 10.0
+
+
+def test_committed_segments_absolute_across_ticks():
+    fake = FakeTranscriber([
+        [(0.0, 10.0, "alpha"), (10.0, 19.0, "beta")],   # tick1 commits alpha, base -> 10s
+        [(0.0, 9.0, "gamma")],                          # tick2 tail starts at 10s -> gamma abs 10..19
+    ])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90, side="local")
+    lt.process_tick(_tail(20)); lt.process_tick(_tail(15))
+    segs = lt.committed_segments()
+    assert [s["text"] for s in segs] == ["alpha", "gamma"]
+    assert segs[1]["start"] == 10.0 and segs[1]["end"] == 19.0
+
+
+def test_finalize_appends_absolute_segment():
+    fake = FakeTranscriber([[(0.0, 4.0, "omega")]])
+    lt = LiveTranscriber(fake, sample_rate=SR, guard_sec=3, max_tail_sec=90, side="local")
+    lt.finalize(_tail(5))
+    segs = lt.committed_segments()
+    assert segs[0]["text"] == "omega" and segs[0]["start"] == 0.0 and segs[0]["end"] == 4.0

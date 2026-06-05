@@ -39,3 +39,15 @@ def test_segments_from_ndarray_writes_tempwav(monkeypatch):
     assert isinstance(t._model.calls[0], str) and t._model.calls[0].endswith(".wav")
     # the temp WAV is cleaned up — no leak across the ~25s live ticks
     assert not os.path.exists(t._model.calls[0])
+
+
+def test_transcribe_segments_writes_temp_wav_at_given_rate(monkeypatch):
+    import numpy as np
+    import meetingscribe.transcriber as tr
+    t = tr.Transcriber()
+    t._model = __import__("unittest").mock.MagicMock()
+    t._model.transcribe.return_value = ([], None)
+    captured = {}
+    monkeypatch.setattr(tr.wavfile, "write", lambda path, rate, data: captured.__setitem__("rate", rate))
+    t.transcribe_segments(np.zeros(100, dtype="float32"), sample_rate=48000)
+    assert captured["rate"] == 48000

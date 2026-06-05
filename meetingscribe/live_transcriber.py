@@ -1,6 +1,7 @@
 import logging
 
 from meetingscribe.config import LIVE_GUARD_SEC, LIVE_MAX_TAIL_SEC
+from meetingscribe.segments import merge_segments
 
 log = logging.getLogger("meetingscribe")
 
@@ -12,12 +13,14 @@ class LiveTranscriber:
     """
 
     def __init__(self, transcriber, sample_rate, guard_sec=LIVE_GUARD_SEC,
-                 max_tail_sec=LIVE_MAX_TAIL_SEC):
+                 max_tail_sec=LIVE_MAX_TAIL_SEC, side=None):
         self._transcriber = transcriber
         self._sr = sample_rate
         self._guard = guard_sec
         self._max_tail = max_tail_sec
+        self._side = side
         self._committed = []          # list[str]
+        self._committed_segments = []  # list[dict] with absolute times + side
         # Absolute sample index transcribed so far. Written only by process_tick/
         # finalize; read by the Stop thread after the worker is joined (Task 6).
         self.committed_sample = 0
@@ -30,6 +33,10 @@ class LiveTranscriber:
     def text(self) -> str:
         return "\n".join(self._committed)
 
+    def committed_segments(self) -> list:
+        """Return a copy of the committed segments with absolute timestamps and side tag."""
+        return list(self._committed_segments)
+
     def process_tick(self, tail) -> None:
         """Transcribe the uncommitted tail; commit segments that ended before the guard.
 
@@ -41,8 +48,9 @@ class LiveTranscriber:
         tail_len_s = len(tail) / self._sr
         if tail_len_s < self._guard + 2:
             return
+        base_s = self.committed_sample / self._sr
         try:
-            segments = list(self._transcriber.transcribe_segments(tail))
+            segments = list(self._transcriber.transcribe_segments(tail, self._sr))
         except Exception:
             log.exception("live: transcribe_segments failed; will retry next tick")
             return
@@ -63,6 +71,12 @@ class LiveTranscriber:
             cleaned = text.strip()
             if cleaned:
                 self._committed.append(cleaned)
+                self._committed_segments.append({
+                    "start": base_s + start,
+                    "end": base_s + end,
+                    "text": cleaned,
+                    "side": self._side,
+                })
             last_end = end
         if last_end is not None:
             self.committed_sample += int(last_end * self._sr)
@@ -80,12 +94,19 @@ class LiveTranscriber:
         nothing left.
         """
         if tail is not None and len(tail) > 0:
+            base_s = self.committed_sample / self._sr
             # Materialize before appending (like process_tick) so a mid-iteration error
             # raises before we touch _committed — finalize stays all-or-nothing.
-            for start, end, text in list(self._transcriber.transcribe_segments(tail)):
+            for start, end, text in list(self._transcriber.transcribe_segments(tail, self._sr)):
                 cleaned = text.strip()
                 if cleaned:
                     self._committed.append(cleaned)
+                    self._committed_segments.append({
+                        "start": base_s + start,
+                        "end": base_s + end,
+                        "text": cleaned,
+                        "side": self._side,
+                    })
                     self._ever_committed = True
         return self.text()
 

@@ -49,13 +49,14 @@ class Transcriber:
                 on_progress(pct)
         return "\n".join(lines)
 
-    def transcribe_segments(self, source):
+    def transcribe_segments(self, source, sample_rate=SAMPLE_RATE):
         """Return a materialized list of (start, end, text) tuples.
 
-        `source` may be a path (str/Path) or a float32 ndarray at SAMPLE_RATE. An
-        ndarray is written to a temp WAV at SAMPLE_RATE so faster-whisper's decoder
-        resamples it to 16 kHz exactly as it does for the on-disk recording — keeping
-        live chunks on the same decode path as the end-of-meeting file.
+        `source` may be a path (str/Path) or a float32 ndarray. An ndarray is
+        written to a temp WAV at `sample_rate` (default SAMPLE_RATE=44100; pass
+        48000 for remote-stream audio) so faster-whisper's decoder resamples it
+        to 16 kHz exactly as it does for the on-disk recording — keeping live
+        chunks on the same decode path as the end-of-meeting file.
         """
         self._load_model()
         if isinstance(source, np.ndarray):
@@ -65,7 +66,7 @@ class Transcriber:
             fd, tmp = tempfile.mkstemp(suffix=".wav")
             os.close(fd)
             try:
-                wavfile.write(tmp, SAMPLE_RATE, int_audio)
+                wavfile.write(tmp, sample_rate, int_audio)
                 segments, _ = self._model.transcribe(tmp, beam_size=5, vad_filter=True)
                 return [(s.start, s.end, s.text) for s in segments]
             finally:
