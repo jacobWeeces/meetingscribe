@@ -19,7 +19,6 @@ class LiveTranscriber:
         self._guard = guard_sec
         self._max_tail = max_tail_sec
         self._side = side
-        self._committed = []          # list[str]
         self._committed_segments = []  # list[dict] with absolute times + side
         # Absolute sample index transcribed so far. Written only by process_tick/
         # finalize; read by the Stop thread after the worker is joined (Task 6).
@@ -29,9 +28,6 @@ class LiveTranscriber:
     @property
     def ever_committed(self) -> bool:
         return self._ever_committed
-
-    def text(self) -> str:
-        return "\n".join(self._committed)
 
     def committed_segments(self) -> list:
         """Return a copy of the committed segments with absolute timestamps and side tag."""
@@ -70,7 +66,6 @@ class LiveTranscriber:
                 break
             cleaned = text.strip()
             if cleaned:
-                self._committed.append(cleaned)
                 self._committed_segments.append({
                     "start": base_s + start,
                     "end": base_s + end,
@@ -82,12 +77,12 @@ class LiveTranscriber:
             self.committed_sample += int(last_end * self._sr)
             self._ever_committed = True
 
-    def finalize(self, tail) -> str:
-        """Commit any remaining tail with no guard (end of meeting); return the full text.
+    def finalize(self, tail) -> None:
+        """Commit any remaining tail with no guard (end of meeting).
 
         Unlike process_tick (which swallows a per-tick error and retries next tick), this
-        lets a transcription error PROPAGATE so the caller (resolve_transcript) can fall
-        back to the whole-file pass — keeping the result never worse than today.
+        lets a transcription error PROPAGATE so the caller (resolve_segments) can fall back
+        to transcribe_streams — keeping the result never worse than today.
 
         `tail` must be the audio starting at `committed_sample`
         (`AudioRecorder.snapshot_mono(self.committed_sample)`), or None/empty if there is
@@ -96,11 +91,10 @@ class LiveTranscriber:
         if tail is not None and len(tail) > 0:
             base_s = self.committed_sample / self._sr
             # Materialize before appending (like process_tick) so a mid-iteration error
-            # raises before we touch _committed — finalize stays all-or-nothing.
+            # raises before we touch _committed_segments — finalize stays all-or-nothing.
             for start, end, text in list(self._transcriber.transcribe_segments(tail, self._sr)):
                 cleaned = text.strip()
                 if cleaned:
-                    self._committed.append(cleaned)
                     self._committed_segments.append({
                         "start": base_s + start,
                         "end": base_s + end,
@@ -108,7 +102,6 @@ class LiveTranscriber:
                         "side": self._side,
                     })
                     self._ever_committed = True
-        return self.text()
 
 
 def resolve_segments(transcriber, live_local, live_remote, final_local_tail,
@@ -138,19 +131,3 @@ def resolve_segments(transcriber, live_local, live_remote, final_local_tail,
         stream_result["local"], stream_result["local_rate"],
         stream_result["remote"], stream_result["remote_rate"], on_progress=on_progress,
     )
-
-
-def resolve_transcript(transcriber, live, final_tail, wav_path, on_progress=None):
-    """Decide the final transcript: the live one if it ran and produced text, else
-    today's whole-WAV pass (the safety net — never worse than today). If the live
-    finalize() fails, fall back to the whole-WAV pass rather than returning a partial."""
-    if live is not None and live.ever_committed:
-        try:
-            transcript = live.finalize(final_tail)
-        except Exception:
-            log.exception("live: finalize failed; falling back to whole-file transcription")
-        else:
-            if on_progress:
-                on_progress(1.0)  # live path has no incremental progress; jump the bar to done
-            return transcript
-    return transcriber.transcribe(wav_path, on_progress=on_progress)

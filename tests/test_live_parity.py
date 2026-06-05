@@ -83,7 +83,10 @@ def test_live_pipeline_matches_whole_file():
     while pos < len(audio):
         lt.process_tick(audio[lt.committed_sample:pos])
         pos += step
-    live = lt.finalize(audio[lt.committed_sample:])
+    lt.finalize(audio[lt.committed_sample:])
+    # finalize() no longer returns text; reconstruct the live transcript from the committed
+    # segments, exactly as production does (committed_segments() -> merge_segments).
+    live = "\n".join(s["text"] for s in lt.committed_segments())
 
     # Prove the live path actually chunked (not silently inert): without this, a
     # process_tick that committed nothing would leave committed_sample at 0, hand the
