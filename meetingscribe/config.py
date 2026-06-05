@@ -9,7 +9,7 @@ WHISPER_COMPUTE_TYPE = "int8"
 SAMPLE_RATE = 44100
 CHANNELS = 1
 BLACKHOLE_DEVICE_NAME = "BlackHole"
-ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 # --- Live (during-meeting) transcription ---
 LIVE_TRANSCRIPTION = True      # default when no per-user setting is stored yet

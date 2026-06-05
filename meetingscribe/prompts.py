@@ -141,3 +141,14 @@ DEADLINES
 If a section has no content, write "None" under it. Deduplicate and merge — don't just concatenate. Jacob should be able to glance at this and turn it into tickets.""",
     },
 }
+
+ACCURACY_RULES = """
+
+Accuracy rules (apply strictly):
+1. Quote dollar amounts, dates, and figures exactly as spoken; do not add legal or technical characterizations (e.g. do not call an amount a "statutory maximum") unless the speaker used that term.
+2. When a decision is revised during the meeting, record only the final decision; never carry both an old and a superseded value.
+3. Preserve concrete specifics: counts, named people, and recipients (e.g. "send it to those three people" -> note that there are three recipients)."""
+
+for _profile in PROFILES.values():
+    for _key in ("system", "chunk", "merge"):
+        _profile[_key] = _profile[_key] + ACCURACY_RULES
