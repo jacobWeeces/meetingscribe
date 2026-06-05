@@ -111,6 +111,30 @@ class LiveTranscriber:
         return self.text()
 
 
+def resolve_segments(transcriber, live_local, live_remote, final_local_tail,
+                     final_remote_tail, stream_result, on_progress=None):
+    """Return one merged side-tagged segment list. Prefer the per-channel live
+    commits (finalize both, merge); else (or on finalize error) the post-Stop
+    transcribe_streams fallback — never worse than the non-live path."""
+    live_ran = (live_local is not None and live_remote is not None
+                and (live_local.ever_committed or live_remote.ever_committed))
+    if live_ran:
+        try:
+            live_local.finalize(final_local_tail)
+            live_remote.finalize(final_remote_tail)
+            merged = merge_segments(live_local.committed_segments(),
+                                    live_remote.committed_segments())
+            if on_progress:
+                on_progress(1.0)
+            return merged
+        except Exception:
+            log.exception("live: finalize failed; falling back to transcribe_streams")
+    return transcriber.transcribe_streams(
+        stream_result["local"], stream_result["local_rate"],
+        stream_result["remote"], stream_result["remote_rate"], on_progress=on_progress,
+    )
+
+
 def resolve_transcript(transcriber, live, final_tail, wav_path, on_progress=None):
     """Decide the final transcript: the live one if it ran and produced text, else
     today's whole-WAV pass (the safety net — never worse than today). If the live

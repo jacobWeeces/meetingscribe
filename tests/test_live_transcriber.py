@@ -206,3 +206,36 @@ def test_finalize_appends_absolute_segment():
     lt.finalize(_tail(5))
     segs = lt.committed_segments()
     assert segs[0]["text"] == "omega" and segs[0]["start"] == 0.0 and segs[0]["end"] == 4.0
+
+
+class FakeStreamTranscriber:
+    def __init__(self, streams_result, seg_scripts=None):
+        self._streams = streams_result
+        self._scripts = list(seg_scripts or [])
+
+    def transcribe_streams(self, *a, **k):
+        return self._streams
+
+    def transcribe_segments(self, source, sample_rate=None):
+        return self._scripts.pop(0) if self._scripts else []
+
+
+def test_resolve_segments_uses_live_when_committed():
+    from meetingscribe.live_transcriber import resolve_segments
+    t = FakeStreamTranscriber(streams_result=[{"start": 9, "end": 9, "text": "FALLBACK", "side": "local", "id": 1}])
+    local = LiveTranscriber(t, sample_rate=SR, side="local"); local._ever_committed = True
+    local._committed_segments = [{"start": 0.0, "end": 1.0, "text": "L", "side": "local"}]
+    remote = LiveTranscriber(t, sample_rate=SR, side="remote"); remote._ever_committed = True
+    remote._committed_segments = [{"start": 0.5, "end": 1.5, "text": "R", "side": "remote"}]
+    merged = resolve_segments(t, local, remote, _tail(0), _tail(0),
+                              {"local": _tail(0), "local_rate": SR, "remote": _tail(0), "remote_rate": SR})
+    assert [s["text"] for s in merged] == ["L", "R"]
+    assert all("id" in s for s in merged)
+
+
+def test_resolve_segments_falls_back_when_no_live():
+    from meetingscribe.live_transcriber import resolve_segments
+    t = FakeStreamTranscriber(streams_result=[{"start": 0, "end": 1, "text": "FB", "side": "local", "id": 1}])
+    merged = resolve_segments(t, None, None, None, None,
+                              {"local": _tail(1), "local_rate": SR, "remote": _tail(0), "remote_rate": SR})
+    assert [s["text"] for s in merged] == ["FB"]
