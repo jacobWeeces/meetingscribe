@@ -14,7 +14,6 @@ Usage::
 
 import threading
 import time
-import traceback
 
 import numpy as np
 
@@ -157,7 +156,6 @@ class SystemAudioRecorder:
         self._stream = None
         self._delegate: "_AudioDelegate | None" = None
         self._keep: list = []  # strong refs so ObjC objects aren't GC'd
-        self._stopped = False
 
     # ------------------------------------------------------------------
 
@@ -259,13 +257,13 @@ class SystemAudioRecorder:
         self._keep = [delegate, stream, filt, cfg]
         self._delegate = delegate
         self._stream = stream
-        self._stopped = False
 
         ok, _err = stream.addStreamOutput_type_sampleHandlerQueue_error_(
             delegate, _AUDIO_TYPE, None, None
         )
         if not ok:
             self._stream = None
+            self._delegate = None
             self._keep = []
             return
 
@@ -282,6 +280,7 @@ class SystemAudioRecorder:
 
         if start_state.get("error") is not None:
             self._stream = None
+            self._delegate = None
             self._keep = []
 
     # ------------------------------------------------------------------
@@ -314,7 +313,6 @@ class SystemAudioRecorder:
         self._stream = None
         # NOTE: intentionally keep self._delegate and self._keep alive so
         # snapshot() remains readable after stop.
-        self._stopped = True
 
         # --- assemble PCM via per-chunk mono ----------------------------
         rate = int(delegate._rate)
