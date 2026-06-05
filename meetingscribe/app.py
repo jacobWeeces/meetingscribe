@@ -5,7 +5,6 @@ import sys
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 
 import AppKit
 import objc
@@ -24,6 +23,7 @@ from meetingscribe.notes import save_to_notes
 from meetingscribe.progress import ProgressWindow
 from meetingscribe.secrets import get_api_key, set_api_key
 from meetingscribe.updater import init_sparkle, check_for_updates
+from meetingscribe.live_transcriber import LiveTranscriber, resolve_segments
 
 ensure_dirs()
 LOG_PATH = DATA_DIR / "meetingscribe.log"
@@ -293,10 +293,15 @@ class MeetingScribeApp(rumps.App):
         self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
         self._timer_thread.start()
 
-        # Live worker NOT started — deferred to Phase 4
-        self._live_local = None
-        self._live_remote = None
-        self._live_worker_thread = None
+        if settings.live_transcription_enabled():
+            self._live_local = LiveTranscriber(self._transcriber, SAMPLE_RATE, side="local")
+            remote_rate = self._recorder.remote_rate() if self._recorder.system_available() else 48000
+            self._live_remote = LiveTranscriber(self._transcriber, remote_rate, side="remote")
+            self._live_worker_thread = threading.Thread(target=self._live_worker, daemon=True)
+            self._live_worker_thread.start()
+            log.info("Live transcription workers started (per-channel)")
+        else:
+            self._live_local = self._live_remote = self._live_worker_thread = None
 
     def _update_timer(self):
         while self._recording:
@@ -308,6 +313,28 @@ class MeetingScribeApp(rumps.App):
             else:
                 self.title = f"{ICON_RECORDING} {mins}:{secs:02d}"
             time.sleep(1)
+
+    def _live_worker(self):
+        try:
+            self._transcriber._load_model()  # preload so first tick & Stop never stall cold
+        except Exception:
+            log.exception("live: model preload failed; disabling live for this session")
+            self._live_local = self._live_remote = None
+            return
+        while self._recording:
+            for _ in range(LIVE_CADENCE_SEC):
+                if not self._recording:
+                    break
+                time.sleep(1)
+            if not self._recording:
+                break
+            for side, lt in (("local", self._live_local), ("remote", self._live_remote)):
+                if lt is None:
+                    continue
+                try:
+                    lt.process_tick(self._recorder.snapshot_side(side, lt.committed_sample))
+                except Exception:
+                    log.exception("live: %s tick failed", side)
 
     def _show_progress(self):
         self._progress_window = ProgressWindow()
@@ -359,23 +386,29 @@ class MeetingScribeApp(rumps.App):
         _main_thread_alert(f"MeetingScribe — {title}", message)
 
     # ------------------------------------------------------------------
-    # Attributed post-Stop pipeline
+    # Attributed post-Stop pipeline (live-aware)
     # ------------------------------------------------------------------
 
     def _process_recording(self):
         try:
+            # Single Whisper model: fully stop the live worker before transcribing here.
+            if self._live_worker_thread is not None:
+                self._live_worker_thread.join()
+                self._live_worker_thread = None
+
             self._update_progress("Loading model...", detail="First time takes a moment")
             self._transcriber._load_model()
             result = self._recorder.stop()
+
+            ll, lr = self._live_local, self._live_remote
+            final_local = self._recorder.snapshot_side("local", ll.committed_sample) if ll is not None else None
+            final_remote = self._recorder.snapshot_side("remote", lr.committed_sample) if lr is not None else None
 
             def on_tx(p):
                 self._update_progress("Transcribing...", pct=p, detail=f"{int(p*100)}% complete")
 
             self._update_progress("Transcribing...", pct=0.0, detail="Converting speech to text")
-            segments = self._transcriber.transcribe_streams(
-                result["local"], result["local_rate"],
-                result["remote"], result["remote_rate"], on_progress=on_tx,
-            )
+            segments = resolve_segments(self._transcriber, ll, lr, final_local, final_remote, result, on_progress=on_tx)
             log.info("Transcription complete, %d segment(s)", len(segments))
 
             if not segments:
