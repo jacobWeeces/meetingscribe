@@ -115,7 +115,12 @@ def resolve_segments(transcriber, live_local, live_remote, final_local_tail,
                      final_remote_tail, stream_result, on_progress=None):
     """Return one merged side-tagged segment list. Prefer the per-channel live
     commits (finalize both, merge); else (or on finalize error) the post-Stop
-    transcribe_streams fallback — never worse than the non-live path."""
+    transcribe_streams fallback — never worse than the non-live path.
+
+    The returned list is the only authoritative result: on a mid-finalize error
+    one LiveTranscriber may be left partially finalized, so callers must not read
+    live_local/live_remote.committed_segments() after this returns.
+    """
     live_ran = (live_local is not None and live_remote is not None
                 and (live_local.ever_committed or live_remote.ever_committed))
     if live_ran:

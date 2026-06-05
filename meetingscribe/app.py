@@ -400,6 +400,9 @@ class MeetingScribeApp(rumps.App):
             self._transcriber._load_model()
             result = self._recorder.stop()
 
+            # Safe to read here: the worker was joined above, so its happens-before
+            # guarantee makes any None-write (preload failure) visible. Do not move
+            # this read before the join.
             ll, lr = self._live_local, self._live_remote
             final_local = self._recorder.snapshot_side("local", ll.committed_sample) if ll is not None else None
             final_remote = self._recorder.snapshot_side("remote", lr.committed_sample) if lr is not None else None
