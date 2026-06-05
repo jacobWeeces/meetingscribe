@@ -57,13 +57,37 @@ def _save_auto_detect_pref(enabled: bool):
         pass
 
 
+def _bundle_id():
+    """The app's ACTUAL bundle identifier in a frozen build — it varies per
+    variant (com.meetingscribe.app vs com.meetingscribe.jacob), so the single-
+    instance guard must read it at runtime rather than hardcode one. Falls back to
+    the default constant in dev/source, where there is no app bundle id and we must
+    NOT match unrelated python processes.
+    """
+    if getattr(sys, "frozen", False):
+        try:
+            bid = AppKit.NSBundle.mainBundle().bundleIdentifier()
+            if bid:
+                return str(bid)
+        except Exception:
+            pass
+    return BUNDLE_ID
+
+
+def _running_pids_for(bundle_id):
+    apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
+    return [a.processIdentifier() for a in apps]
+
+
 def _is_already_running():
-    running = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(BUNDLE_ID)
+    """True if another instance of THIS app (same bundle id) is already running.
+
+    A frozen PyInstaller app can be transiently re-execed (e.g. a multiprocessing
+    helper re-launching sys.executable); this guard makes such a child exit in
+    main() before it ever builds a second menu-bar session.
+    """
     my_pid = os.getpid()
-    for app in running:
-        if app.processIdentifier() != my_pid:
-            return True
-    return False
+    return any(pid != my_pid for pid in _running_pids_for(_bundle_id()))
 
 
 def _app_version():
