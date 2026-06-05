@@ -82,7 +82,7 @@ class Transcriber:
         self._load_model()
         streams = [("local", local, local_rate), ("remote", remote, remote_rate)]
         def _dur(arr, rate):
-            return arr.size / rate if rate > 0 and arr.size > 0 else 0.0
+            return arr.shape[0] / rate if rate > 0 and arr.size > 0 else 0.0
         total_dur = sum(_dur(a, r) for _, a, r in streams)
         elapsed, local_segs, remote_segs = 0.0, [], []
         for side, arr, rate in streams:
