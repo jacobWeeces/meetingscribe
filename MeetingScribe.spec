@@ -38,6 +38,8 @@ a = Analysis(
         'Foundation',
         'PyObjCTools',
         'Security',
+        'ScreenCaptureKit',
+        'CoreMedia',
     ],
     hookspath=[],
     hooksconfig={},
