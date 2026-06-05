@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -10,12 +11,15 @@ import AppKit
 import objc
 import rumps
 
-from meetingscribe.config import DATA_DIR, ensure_dirs, SAMPLE_RATE, LIVE_CADENCE_SEC
-from meetingscribe.live_transcriber import LiveTranscriber, resolve_transcript
+from meetingscribe.config import DATA_DIR, USER_PROFILE, ensure_dirs, SAMPLE_RATE, LIVE_CADENCE_SEC
 from meetingscribe import settings
 from meetingscribe.recorder import AudioRecorder
 from meetingscribe.transcriber import Transcriber
 from meetingscribe.summarizer import Summarizer
+from meetingscribe.speakers import name_speakers
+from meetingscribe.segments import format_transcript
+from meetingscribe.system_audio import SystemAudioRecorder
+from meetingscribe.meeting_detector import MeetingDetector
 from meetingscribe.notes import save_to_notes
 from meetingscribe.progress import ProgressWindow
 from meetingscribe.secrets import get_api_key, set_api_key
@@ -33,6 +37,24 @@ log = logging.getLogger("meetingscribe")
 ICON_IDLE = "🎙"
 ICON_RECORDING = "🔴"
 BUNDLE_ID = "com.meetingscribe.app"
+PROFILE_DISPLAY_NAME = USER_PROFILE.capitalize()
+
+_AUTO_DETECT_PREF = DATA_DIR / "auto_detect.json"
+
+
+def _load_auto_detect_pref() -> bool:
+    """Return the saved auto-detect enabled state; default True if absent."""
+    try:
+        return json.loads(_AUTO_DETECT_PREF.read_text()).get("enabled", True)
+    except Exception:
+        return True
+
+
+def _save_auto_detect_pref(enabled: bool):
+    try:
+        _AUTO_DETECT_PREF.write_text(json.dumps({"enabled": enabled}))
+    except Exception:
+        pass
 
 
 def _is_already_running():
@@ -92,7 +114,7 @@ def _main_thread_alert(title, message):
 
 
 def prompt_for_api_key():
-    """Ask Laurelle for her Anthropic API key and store it. Returns the key or ''."""
+    """Ask the user for their Anthropic API key and store it. Returns the key or ''."""
     win = rumps.Window(
         title="MeetingScribe — Anthropic API Key",
         message=(
@@ -115,19 +137,30 @@ def prompt_for_api_key():
 class MeetingScribeApp(rumps.App):
     def __init__(self):
         super().__init__(ICON_IDLE, quit_button=None)
+
+        # Build auto-detect menu item with persisted state
+        _auto_detect_enabled = _load_auto_detect_pref()
+        _auto_detect_item = rumps.MenuItem(
+            "Auto-detect meetings", callback=self._toggle_auto_detect
+        )
+        _auto_detect_item.state = int(_auto_detect_enabled)
+
         live_item = rumps.MenuItem("Live transcription", callback=self.toggle_live_transcription)
         live_item.state = 1 if settings.live_transcription_enabled() else 0
+
         self.menu = [
             rumps.MenuItem(f"MeetingScribe v{_app_version()}"),
             None,
             rumps.MenuItem("Start Recording", callback=self.toggle_recording),
             None,
+            _auto_detect_item,
             live_item,
             rumps.MenuItem("Set API Key…", callback=self.set_api_key_clicked),
             rumps.MenuItem("Check for Updates…", callback=check_for_updates),
             None,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
+
         self._recorder = AudioRecorder()
         self._transcriber = Transcriber()
         self._summarizer = Summarizer()
@@ -136,8 +169,18 @@ class MeetingScribeApp(rumps.App):
         self._start_time = None
         self._timer_thread = None
         self._progress_window = None
-        self._live = None
+        # Live worker placeholders — NOT started here; wired in Phase 4
+        self._live_local = None
+        self._live_remote = None
         self._live_worker_thread = None
+
+        # Auto-detect detector
+        self._detector = MeetingDetector(
+            on_detect=self._on_meeting_detected,
+            is_recording=lambda: self._recording,
+        )
+        if _auto_detect_enabled:
+            self._detector.start()
 
         log.info("MeetingScribe started (pid %d)", os.getpid())
 
@@ -146,13 +189,36 @@ class MeetingScribeApp(rumps.App):
 
         init_sparkle()
 
+        if not SystemAudioRecorder().available():
+            rumps.alert(
+                title="MeetingScribe — Screen Recording needed",
+                message=(
+                    "System-audio capture needs Screen Recording permission.\n"
+                    "Grant it in System Settings → Privacy & Security → Screen Recording, "
+                    "then reopen MeetingScribe.\n\n"
+                    "Until then, recordings will capture your microphone only."
+                ),
+            )
+
+    # ------------------------------------------------------------------
+    # API key
+    # ------------------------------------------------------------------
+
     def set_api_key_clicked(self, _sender):
         prompt_for_api_key()
+
+    # ------------------------------------------------------------------
+    # Live transcription toggle (checkbox only — worker not started yet)
+    # ------------------------------------------------------------------
 
     def toggle_live_transcription(self, sender):
         sender.state = 0 if sender.state else 1
         settings.set_live_transcription(bool(sender.state))
         log.info("Live transcription set to %s (applies to next recording)", bool(sender.state))
+
+    # ------------------------------------------------------------------
+    # Recording toggle
+    # ------------------------------------------------------------------
 
     def toggle_recording(self, sender):
         if self._processing:
@@ -162,6 +228,58 @@ class MeetingScribeApp(rumps.App):
             self._start_recording(sender)
         else:
             self._stop_recording(sender)
+
+    # ------------------------------------------------------------------
+    # Auto-detect callbacks
+    # ------------------------------------------------------------------
+
+    def _toggle_auto_detect(self, sender):
+        """Toggle the auto-detect pref and start/stop the detector accordingly."""
+        sender.state = 0 if sender.state else 1
+        enabled = bool(sender.state)
+        _save_auto_detect_pref(enabled)
+        if enabled:
+            self._detector.start()
+        else:
+            self._detector.stop()
+        log.info("Auto-detect meetings: %s", "on" if enabled else "off")
+
+    def _on_meeting_detected(self):
+        """Called from the detector thread; marshal the prompt to the main thread."""
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(self._prompt_record)
+
+    def _prompt_record(self):
+        """Show the meeting-detected confirmation popup, forced above other apps.
+
+        MeetingScribe is an accessory app (LSUIElement), so a plain alert renders
+        behind the frontmost app (Zoom/Teams). Activate the app, raise the alert's
+        window level, and let it appear over full-screen Spaces.
+        """
+        if self._recording or self._processing:
+            return
+
+        AppKit.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("Meeting detected")
+        alert.setInformativeText_("Start recording this meeting?")
+        alert.addButtonWithTitle_("Start")
+        alert.addButtonWithTitle_("Not now")
+
+        window = alert.window()
+        window.setLevel_(AppKit.NSModalPanelWindowLevel)
+        window.setCollectionBehavior_(
+            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+            | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+        )
+
+        if alert.runModal() == AppKit.NSAlertFirstButtonReturn:
+            self.toggle_recording(self.menu["Start Recording"])
+
+    # ------------------------------------------------------------------
+    # Recording start / stop
+    # ------------------------------------------------------------------
 
     def _start_recording(self, sender):
         self._recorder = AudioRecorder()
@@ -175,14 +293,10 @@ class MeetingScribeApp(rumps.App):
         self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
         self._timer_thread.start()
 
-        if settings.live_transcription_enabled():
-            self._live = LiveTranscriber(self._transcriber, SAMPLE_RATE)
-            self._live_worker_thread = threading.Thread(target=self._live_worker, daemon=True)
-            self._live_worker_thread.start()
-            log.info("Live transcription worker started")
-        else:
-            self._live = None
-            self._live_worker_thread = None
+        # Live worker NOT started — deferred to Phase 4
+        self._live_local = None
+        self._live_remote = None
+        self._live_worker_thread = None
 
     def _update_timer(self):
         while self._recording:
@@ -195,29 +309,6 @@ class MeetingScribeApp(rumps.App):
                 self.title = f"{ICON_RECORDING} {mins}:{secs:02d}"
             time.sleep(1)
 
-    def _live_worker(self):
-        try:
-            self._transcriber._load_model()   # preload so the first tick & Stop never stall cold
-        except Exception:
-            log.exception("live: model preload failed; disabling live for this session")
-            self._live = None
-            return
-        while self._recording:
-            for _ in range(LIVE_CADENCE_SEC):
-                if not self._recording:
-                    break
-                time.sleep(1)
-            if not self._recording:
-                break
-            live = self._live
-            if live is None:
-                break
-            try:
-                tail = self._recorder.snapshot_mono(live.committed_sample)
-                live.process_tick(tail)
-            except Exception:
-                log.exception("live: worker tick failed")
-
     def _show_progress(self):
         self._progress_window = ProgressWindow()
         self._progress_window.show()
@@ -229,20 +320,22 @@ class MeetingScribeApp(rumps.App):
 
     def _stop_recording(self, sender):
         self._recording = False
-        wav_path = self._recorder.stop()
         sender.title = "Start Recording"
         self.title = "⏳"
         self._processing = True
-        log.info("Recording stopped, saved to %s", wav_path)
+        log.info("Recording stopped, starting processing")
 
         self._show_progress()
 
         thread = threading.Thread(
             target=self._process_recording,
-            args=(wav_path,),
             daemon=True,
         )
         thread.start()
+
+    # ------------------------------------------------------------------
+    # Progress helpers
+    # ------------------------------------------------------------------
 
     def _update_progress(self, stage, pct=None, detail=""):
         self.title = f"⏳ {stage}"
@@ -259,94 +352,67 @@ class MeetingScribeApp(rumps.App):
     def _finish(self, title, message):
         self.title = ICON_IDLE
         self._processing = False
-        self._live = None  # release the finished session's transcript text
+        self._live_local = None
+        self._live_remote = None
         self._close_progress()
         notify(title, message)
         _main_thread_alert(f"MeetingScribe — {title}", message)
 
-    def _process_recording(self, wav_path):
-        try:
-            # The live worker shares self._transcriber's single Whisper model, so it must
-            # be fully stopped before we transcribe here. Join it (no timeout) on this
-            # background thread: the menu-bar UI stays responsive and the model is never
-            # used by two threads at once. The worker exits on its own now that
-            # self._recording is False (after finishing any in-flight tick).
-            if self._live_worker_thread is not None:
-                self._live_worker_thread.join()
-                self._live_worker_thread = None
-            live = self._live
-            # snapshot_mono is valid after recorder.stop(): stop() concatenates the frame
-            # lists but does not clear them.
-            final_tail = (
-                self._recorder.snapshot_mono(live.committed_sample) if live is not None else None
-            )
+    # ------------------------------------------------------------------
+    # Attributed post-Stop pipeline
+    # ------------------------------------------------------------------
 
+    def _process_recording(self):
+        try:
             self._update_progress("Loading model...", detail="First time takes a moment")
             self._transcriber._load_model()
+            result = self._recorder.stop()
+
+            def on_tx(p):
+                self._update_progress("Transcribing...", pct=p, detail=f"{int(p*100)}% complete")
 
             self._update_progress("Transcribing...", pct=0.0, detail="Converting speech to text")
-
-            def on_transcribe_progress(pct):
-                self._update_progress(
-                    "Transcribing...",
-                    pct=pct,
-                    detail=f"{int(pct * 100)}% complete",
-                )
-
-            transcript = resolve_transcript(
-                self._transcriber,
-                live,
-                final_tail,
-                wav_path,
-                on_progress=on_transcribe_progress,
+            segments = self._transcriber.transcribe_streams(
+                result["local"], result["local_rate"],
+                result["remote"], result["remote_rate"], on_progress=on_tx,
             )
-            log.info("Transcription complete, length: %d chars", len(transcript))
+            log.info("Transcription complete, %d segment(s)", len(segments))
 
-            if not transcript.strip():
+            if not segments:
                 log.warning("No speech detected")
                 self._finish("No speech detected", "The recording didn't contain any recognizable speech.")
                 return
 
-            self._update_progress("Summarizing...", detail="Generating meeting notes with AI")
+            self._update_progress("Identifying speakers...", detail="Labeling who said what")
+            named = name_speakers(segments, local_name=PROFILE_DISPLAY_NAME)
+            transcript_text = format_transcript(named)
+            log.info("Speaker naming complete, transcript length: %d chars", len(transcript_text))
 
+            self._update_progress("Summarizing...", detail="Generating meeting notes with AI")
             from meetingscribe.summarizer import NoAPIKeyError
             try:
-                summary = self._summarizer.summarize(transcript)
+                summary = self._summarizer.summarize(transcript_text)
             except NoAPIKeyError:
                 from datetime import datetime as _dt
-                save_to_notes(f"Meeting — {_dt.now():%Y-%m-%d %H:%M}", transcript)
+                save_to_notes(f"Meeting — {_dt.now():%Y-%m-%d %H:%M}", transcript_text)
                 self._finish(
                     "No API key",
                     "Saved the transcript to Apple Notes, but skipped the AI summary — "
-                    "set your Anthropic API key from the menu (Set API Key…).",
+                    "set your Anthropic API key (Set API Key…).",
                 )
                 return
             log.info("Summarization complete, length: %d chars", len(summary))
 
             self._update_progress("Saving to Notes...", pct=0.95, detail="Almost done")
-
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
             title = f"Meeting — {timestamp}"
-
             body = (
-                f"MEETING NOTES — {timestamp}\n"
-                f"{'=' * 50}\n\n"
-                f"{summary}\n\n"
-                f"{'=' * 50}\n"
-                f"RAW TRANSCRIPT\n"
-                f"{'=' * 50}\n\n"
-                f"{transcript}"
+                f"MEETING NOTES — {timestamp}\n{'=' * 50}\n\n{summary}\n\n"
+                f"{'=' * 50}\nRAW TRANSCRIPT\n{'=' * 50}\n\n{transcript_text}"
             )
-
             saved = save_to_notes(title, body)
-
             if saved:
                 log.info("Note saved: %s", title)
-                try:
-                    os.remove(wav_path)
-                    log.info("Cleaned up recording: %s", wav_path)
-                except OSError as cleanup_err:
-                    log.warning("Could not delete recording: %s", cleanup_err)
                 self._finish("Done!", f"Your meeting notes have been saved to Apple Notes.\n\n\"{title}\"")
             else:
                 log.error("Failed to save to Notes")
@@ -355,6 +421,12 @@ class MeetingScribeApp(rumps.App):
         except Exception as e:
             log.exception("Error processing recording")
             self._finish("Error", f"Something went wrong:\n\n{str(e)[:300]}")
+        finally:
+            if getattr(self._recorder, "_sys", None) is not None:
+                try:
+                    self._recorder._sys.release()
+                except Exception:
+                    pass
 
 
 def main():
