@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from unittest import mock
 
 
@@ -14,9 +15,11 @@ def test_stop_returns_two_streams_and_t0(monkeypatch):
     rec.start()
     rec._mic_frames = [np.zeros((1000, 1), dtype="float32")]
     result = rec.stop()
-    assert set(result) >= {"local", "remote", "t0", "local_rate", "remote_rate"}
+    assert set(result) >= {"local", "remote", "t0", "local_rate", "remote_rate", "system_available"}
     assert isinstance(result["local"], np.ndarray)
     assert result["remote_rate"] == 48000
+    assert result["system_available"] is True
+    assert isinstance(result["t0"], float)
 
 
 def _mk_recorder(monkeypatch):
@@ -74,3 +77,9 @@ def test_remote_rate_from_sys_or_default(monkeypatch):
     fake = mock.MagicMock(); fake.rate.return_value = 44100
     r._sys = fake; r._system_available = True
     assert r.remote_rate() == 44100
+
+
+def test_snapshot_side_unknown_side_raises(monkeypatch):
+    r = _mk_recorder(monkeypatch)
+    with pytest.raises(ValueError):
+        r.snapshot_side("sideways", 0)
