@@ -27,10 +27,14 @@ def test_resample_to_16k_changes_length_proportionally():
 def test_planar_chunks_to_mono_converts_each_chunk_independently():
     import numpy as np
     from meetingscribe.audio_format import planar_chunks_to_mono
-    c1 = np.array([1.0, 1.0,  0.0, 0.0], dtype="<f4").tobytes()  # L=[1,1] R=[0,0] -> [0.5,0.5]
-    c2 = np.array([0.0, 0.0,  1.0, 1.0], dtype="<f4").tobytes()  # L=[0,0] R=[1,1] -> [0.5,0.5]
+    # Each chunk is its own planar [L..., R...] block.
+    # c1: L=[1,0] R=[0,1] -> mono [0.5, 0.5];  c2: L=[2,0] R=[0,2] -> mono [1.0, 1.0]
+    c1 = np.array([1.0, 0.0,  0.0, 1.0], dtype="<f4").tobytes()
+    c2 = np.array([2.0, 0.0,  0.0, 2.0], dtype="<f4").tobytes()
     mono = planar_chunks_to_mono([c1, c2], channels=2)
-    np.testing.assert_allclose(mono, [0.5, 0.5, 0.5, 0.5], atol=1e-6)
+    np.testing.assert_allclose(mono, [0.5, 0.5, 1.0, 1.0], atol=1e-6)
+    # Guard: the wrong "join bytes then de-interleave once" approach would give
+    # [1.5, 0.0, 0.0, 1.5] for this data, so this test now distinguishes the two.
 
 
 def test_planar_chunks_to_mono_empty_is_empty_float32():
