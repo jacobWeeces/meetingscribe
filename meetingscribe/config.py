@@ -8,7 +8,6 @@ RECORDINGS_DIR = DATA_DIR / "recordings"
 WHISPER_COMPUTE_TYPE = "int8"
 SAMPLE_RATE = 44100
 CHANNELS = 1
-BLACKHOLE_DEVICE_NAME = "BlackHole"
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 # --- Live (during-meeting) transcription ---

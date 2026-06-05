@@ -83,3 +83,20 @@ def test_snapshot_side_unknown_side_raises(monkeypatch):
     r = _mk_recorder(monkeypatch)
     with pytest.raises(ValueError):
         r.snapshot_side("sideways", 0)
+
+
+def test_snapshot_side_local_valid_after_stop(monkeypatch):
+    # The final live tail is read via snapshot_side AFTER recorder.stop();
+    # stop() must not clear _mic_frames.
+    from meetingscribe import recorder
+    monkeypatch.setattr(recorder.sd, "InputStream", mock.MagicMock())
+    fake_sys = mock.MagicMock()
+    fake_sys.available.return_value = False  # mic-only keeps the assertion simple
+    monkeypatch.setattr(recorder, "SystemAudioRecorder", lambda: fake_sys)
+
+    rec = recorder.AudioRecorder()
+    rec.start()
+    rec._mic_frames = [np.array([0.1, 0.2, 0.3, 0.4], dtype="float32").reshape(-1, 1)]
+    rec.stop()
+    out = rec.snapshot_side("local", 2)   # still readable post-stop
+    assert np.allclose(out, [0.3, 0.4])
