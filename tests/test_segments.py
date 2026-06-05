@@ -38,6 +38,14 @@ def test_apply_speaker_map_can_name_local_in_room_speaker():
     assert by_id[3] == "Matt"            # local overridden by map
 
 
+def test_merge_does_not_mutate_input_dicts():
+    local = [seg(0.0, 1.0, "hi", "local")]
+    remote = [seg(2.0, 3.0, "yo", "remote")]
+    merge_segments(local, remote)
+    assert "id" not in local[0]
+    assert "id" not in remote[0]
+
+
 def test_format_groups_consecutive_same_speaker_with_timestamp():
     named = [
         {"start": 12.0, "speaker": "Jacob", "text": "A."},

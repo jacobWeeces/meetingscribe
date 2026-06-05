@@ -1,5 +1,5 @@
 import numpy as np
-from meetingscribe.audio_format import planar_float32_to_mono, resample_to_16k
+from meetingscribe.audio_format import planar_float32_to_mono, resample_to_16k, planar_chunks_to_mono
 
 
 def test_planar_float32_to_mono_averages_channels():
@@ -25,8 +25,6 @@ def test_resample_to_16k_changes_length_proportionally():
 
 
 def test_planar_chunks_to_mono_converts_each_chunk_independently():
-    import numpy as np
-    from meetingscribe.audio_format import planar_chunks_to_mono
     # Each chunk is its own planar [L..., R...] block.
     # c1: L=[1,0] R=[0,1] -> mono [0.5, 0.5];  c2: L=[2,0] R=[0,2] -> mono [1.0, 1.0]
     c1 = np.array([1.0, 0.0,  0.0, 1.0], dtype="<f4").tobytes()
@@ -38,7 +36,5 @@ def test_planar_chunks_to_mono_converts_each_chunk_independently():
 
 
 def test_planar_chunks_to_mono_empty_is_empty_float32():
-    import numpy as np
-    from meetingscribe.audio_format import planar_chunks_to_mono
     out = planar_chunks_to_mono([], channels=2)
     assert out.dtype == np.float32 and out.size == 0

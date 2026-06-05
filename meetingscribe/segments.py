@@ -8,9 +8,7 @@ def merge_segments(local: list[dict], remote: list[dict]) -> list[dict]:
     timeline. Assigns a stable 1-based `id` to each merged segment.
     """
     merged = sorted([*local, *remote], key=lambda s: (s["start"], s["end"]))
-    for i, s in enumerate(merged, start=1):
-        s["id"] = i
-    return merged
+    return [{**s, "id": i} for i, s in enumerate(merged, start=1)]
 
 
 def apply_speaker_map(segments: list[dict], name_map: dict, local_name: str) -> list[dict]:
@@ -24,8 +22,9 @@ def apply_speaker_map(segments: list[dict], name_map: dict, local_name: str) -> 
     """
     out = []
     for s in segments:
-        mapped = name_map.get(s["id"]) or name_map.get(str(s["id"]))
-        if mapped:
+        _id = s["id"]
+        mapped = name_map.get(_id, name_map.get(str(_id)))
+        if mapped is not None:
             speaker = mapped
         elif s["side"] == "local":
             speaker = local_name
