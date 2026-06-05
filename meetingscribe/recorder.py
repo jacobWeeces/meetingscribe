@@ -1,80 +1,30 @@
 import threading
-from datetime import datetime
-from pathlib import Path
+import time
 
 import numpy as np
 import sounddevice as sd
-from scipy.io import wavfile
 
-from meetingscribe.config import (
-    BLACKHOLE_DEVICE_NAME,
-    RECORDINGS_DIR,
-    SAMPLE_RATE,
-    ensure_dirs,
-)
-
-
-def find_blackhole_device():
-    devices = sd.query_devices()
-    for i, d in enumerate(devices):
-        if BLACKHOLE_DEVICE_NAME in d["name"] and d["max_input_channels"] > 0:
-            return i
-    return None
+from meetingscribe.config import SAMPLE_RATE, ensure_dirs
+from meetingscribe.system_audio import SystemAudioRecorder
 
 
 class AudioRecorder:
     def __init__(self):
         self._mic_frames = []
-        self._sys_frames = []
         self._mic_stream = None
-        self._sys_stream = None
-        self._recording = False
+        self._sys = None
+        self._system_available = False
         self._lock = threading.Lock()
-        self._blackhole_id = find_blackhole_device()
-
-    @property
-    def has_system_audio(self):
-        return self._blackhole_id is not None
+        self.t0 = None
 
     def _mic_callback(self, indata, frames, time_info, status):
         with self._lock:
             self._mic_frames.append(indata.copy())
 
-    def _sys_callback(self, indata, frames, time_info, status):
-        with self._lock:
-            self._sys_frames.append(indata.copy())
-
-    def snapshot_mono(self, start_sample: int = 0) -> np.ndarray:
-        """Mono mix (mic + sys)/2 of everything captured so far, from start_sample on.
-
-        Mic-only when there's no system stream. Clipped to the shorter of the two
-        streams, matching how stop() aligns them. Safe to call while recording.
-        """
-        # Copy the frame-list references under the lock (cheap O(n) pointer copy), then
-        # concatenate OUTSIDE the lock. The callbacks only ever append new blocks, so the
-        # copied references stay valid; this avoids stalling the capture callbacks (xruns)
-        # behind a multi-millisecond concatenate on a long meeting.
-        with self._lock:
-            mic_blocks = list(self._mic_frames)
-            sys_blocks = list(self._sys_frames) if self._sys_frames else None
-
-        mic = np.concatenate(mic_blocks) if mic_blocks else np.zeros((0, 1), dtype="float32")
-        sys = np.concatenate(sys_blocks) if sys_blocks else None
-
-        mic = mic[:, 0] if mic.ndim > 1 else mic
-        if sys is not None and len(sys) > 0:
-            sys = sys[:, 0] if sys.ndim > 1 else sys
-            n = min(len(mic), len(sys))
-            mono = (mic[:n] + sys[:n]) / 2.0
-        else:
-            mono = mic
-        return mono[start_sample:].astype("float32")
-
     def start(self):
         ensure_dirs()
         self._mic_frames = []
-        self._sys_frames = []
-        self._recording = True
+        self.t0 = time.time()
 
         self._mic_stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -84,44 +34,63 @@ class AudioRecorder:
         )
         self._mic_stream.start()
 
-        if self._blackhole_id is not None:
-            self._sys_stream = sd.InputStream(
-                device=self._blackhole_id,
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype="float32",
-                callback=self._sys_callback,
-            )
-            self._sys_stream.start()
+        self._sys = SystemAudioRecorder()
+        if self._sys.available():
+            self._sys.start()
+            self._system_available = True
+        else:
+            self._system_available = False
 
-    def stop(self) -> Path:
-        self._recording = False
-
+    def stop(self) -> dict:
         if self._mic_stream:
             self._mic_stream.stop()
             self._mic_stream.close()
             self._mic_stream = None
 
-        if self._sys_stream:
-            self._sys_stream.stop()
-            self._sys_stream.close()
-            self._sys_stream = None
+        with self._lock:
+            frames = list(self._mic_frames)
 
-        mic_audio = np.concatenate(self._mic_frames) if self._mic_frames else np.zeros((0, 1), dtype="float32")
-        sys_audio = np.concatenate(self._sys_frames) if self._sys_frames else None
-
-        if sys_audio is not None:
-            min_len = min(len(mic_audio), len(sys_audio))
-            mic_audio = mic_audio[:min_len]
-            sys_audio = sys_audio[:min_len]
-            stereo = np.hstack([mic_audio, sys_audio])
+        if frames:
+            local = np.concatenate(frames).reshape(-1).astype("float32")
         else:
-            stereo = mic_audio
+            local = np.zeros(0, dtype="float32")
 
-        int_audio = np.clip(stereo * 32767, -32768, 32767).astype(np.int16)
+        if self._system_available and self._sys is not None:
+            remote, remote_rate = self._sys.stop()
+        else:
+            remote = np.zeros(0, dtype="float32")
+            remote_rate = 48000
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = RECORDINGS_DIR / f"recording_{timestamp}.wav"
-        wavfile.write(str(path), SAMPLE_RATE, int_audio)
+        return {
+            "local": local,
+            "local_rate": SAMPLE_RATE,
+            "remote": remote,
+            "remote_rate": remote_rate,
+            "t0": self.t0,
+            "system_available": self._system_available,
+        }
 
-        return path
+    def snapshot_side(self, side: str, start_frame: int = 0) -> np.ndarray:
+        """Thread-safe mono audio for one side, from start_frame to now.
+
+        Valid during recording and after stop() (stop() does not clear buffers).
+        'local' = mic frames; 'remote' = system stream (empty when mic-only).
+        """
+        if side == "local":
+            with self._lock:
+                blocks = list(self._mic_frames)
+            if not blocks:
+                return np.zeros(0, dtype="float32")
+            mono = np.concatenate(blocks).reshape(-1).astype("float32")
+            return mono[start_frame:]
+        if side == "remote":
+            if self._system_available and self._sys is not None:
+                return self._sys.snapshot(start_frame).astype("float32")
+            return np.zeros(0, dtype="float32")
+        raise ValueError(f"unknown side: {side}")
+
+    def system_available(self) -> bool:
+        return self._system_available
+
+    def remote_rate(self) -> int:
+        return self._sys.rate() if (self._system_available and self._sys is not None) else 48000
