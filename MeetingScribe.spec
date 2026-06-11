@@ -40,6 +40,7 @@ a = Analysis(
         'Security',
         'ScreenCaptureKit',
         'CoreMedia',
+        'AVFoundation',
     ],
     hookspath=[],
     hooksconfig={},

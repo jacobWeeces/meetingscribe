@@ -12,7 +12,8 @@ import rumps
 
 from meetingscribe.config import DATA_DIR, USER_PROFILE, ensure_dirs, SAMPLE_RATE, LIVE_CADENCE_SEC
 from meetingscribe import settings
-from meetingscribe.recorder import AudioRecorder
+from meetingscribe.recorder import AudioRecorder, local_silent_with_remote_signal
+from meetingscribe.permissions import request_mic_access
 from meetingscribe.transcriber import Transcriber
 from meetingscribe.summarizer import Summarizer
 from meetingscribe.speakers import name_speakers
@@ -212,6 +213,24 @@ class MeetingScribeApp(rumps.App):
             prompt_for_api_key()
 
         init_sparkle()
+
+        # Microphone: as a background LSUIElement app the implicit PortAudio prompt
+        # renders behind the call app and is missed, so the mic records silence and
+        # only the remote (system-audio) side is transcribed. Request it explicitly,
+        # foregrounded, mirroring the Screen Recording UX below.
+        _bring_to_front()
+        mic_status = request_mic_access()
+        log.info("microphone authorization: %s", mic_status)
+        if mic_status in ("denied", "restricted"):
+            rumps.alert(
+                title="MeetingScribe — Microphone needed",
+                message=(
+                    "MeetingScribe doesn't have microphone access, so your side of "
+                    "meetings won't be recorded — only other participants.\n\n"
+                    "Grant it in System Settings → Privacy & Security → Microphone, "
+                    "then reopen MeetingScribe."
+                ),
+            )
 
         if not SystemAudioRecorder().available():
             rumps.alert(
@@ -441,6 +460,12 @@ class MeetingScribeApp(rumps.App):
             self._transcriber._load_model()
             result = self._recorder.stop()
 
+            mic_silent = local_silent_with_remote_signal(result["local"], result["remote"])
+            if mic_silent:
+                log.warning("microphone channel was silent while system audio had signal "
+                            "— only remote participants captured (check Microphone "
+                            "permission and input device)")
+
             # Safe to read here: the worker was joined above, so its happens-before
             # guarantee makes any None-write (preload failure) visible. Do not move
             # this read before the join.
@@ -483,14 +508,24 @@ class MeetingScribeApp(rumps.App):
             self._update_progress("Saving to Notes...", pct=0.95, detail="Almost done")
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
             title = f"Meeting — {timestamp}"
+            mic_banner = (
+                "⚠️ Your microphone recorded no audio — only other participants were "
+                "captured. Check System Settings → Privacy & Security → Microphone "
+                "(and your input device), then re-record.\n\n"
+                if mic_silent else ""
+            )
             body = (
-                f"MEETING NOTES — {timestamp}\n{'=' * 50}\n\n{summary}\n\n"
+                f"MEETING NOTES — {timestamp}\n{'=' * 50}\n\n{mic_banner}{summary}\n\n"
                 f"{'=' * 50}\nRAW TRANSCRIPT\n{'=' * 50}\n\n{transcript_text}"
             )
             saved = save_to_notes(title, body)
             if saved:
                 log.info("Note saved: %s", title)
-                self._finish("Done!", f"Your meeting notes have been saved to Apple Notes.\n\n\"{title}\"")
+                done_msg = f"Your meeting notes have been saved to Apple Notes.\n\n\"{title}\""
+                if mic_silent:
+                    done_msg += ("\n\n⚠️ Your microphone recorded no audio — only other "
+                                 "participants were captured. Check Microphone permission.")
+                self._finish("Done!", done_msg)
             else:
                 log.error("Failed to save to Notes")
                 self._finish("Warning", "Transcription complete but couldn't save to Apple Notes.\nCheck that Notes is set up with an iCloud account.")
