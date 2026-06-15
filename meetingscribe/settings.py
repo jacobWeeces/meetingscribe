@@ -7,6 +7,7 @@ at runtime.
 
 import json
 import os
+import tempfile
 
 from meetingscribe.config import DATA_DIR, LIVE_TRANSCRIPTION
 
@@ -24,7 +25,18 @@ def _read():
 
 def _write(data):
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_PATH.write_text(json.dumps(data))
+    # Write-then-rename so an interrupted write can't truncate/corrupt settings.json.
+    fd, tmp = tempfile.mkstemp(dir=str(SETTINGS_PATH.parent), prefix=".settings-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data))
+        os.replace(tmp, SETTINGS_PATH)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def live_transcription_enabled() -> bool:

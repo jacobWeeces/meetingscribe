@@ -15,6 +15,20 @@ class NoAPIKeyError(RuntimeError):
     """Raised when summarization is attempted without an Anthropic API key."""
 
 
+def _first_text(message) -> str:
+    """Return the first text block of an Anthropic message, or raise if there is none.
+
+    Guards against an empty `content` list or a non-text first block (e.g. a
+    tool-use or refusal block) so we get a clear error the caller can recover from
+    instead of an opaque IndexError/AttributeError.
+    """
+    for block in (getattr(message, "content", None) or []):
+        text = getattr(block, "text", None)
+        if text:
+            return text
+    raise RuntimeError("Anthropic response contained no text content")
+
+
 def _split_transcript(transcript, max_chars=MAX_CHUNK_CHARS):
     lines = transcript.split("\n")
     chunks = []
@@ -57,7 +71,7 @@ class Summarizer:
             system=system,
             messages=[{"role": "user", "content": user_content}],
         )
-        return message.content[0].text
+        return _first_text(message)
 
     def summarize(self, transcript: str) -> str:
         if len(transcript) <= MAX_CHUNK_CHARS:

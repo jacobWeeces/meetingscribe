@@ -1,5 +1,21 @@
+import threading
+
 import AppKit
 import objc
+from PyObjCTools import AppHelper
+
+
+def _run_on_main(fn):
+    """Run fn on the main thread now if we're already on it, else schedule it.
+
+    AppKit objects (NSProgressIndicator, NSWindow, ...) may only be touched on the
+    main thread; _update_progress calls these setters from the background
+    processing thread.
+    """
+    if threading.current_thread() is threading.main_thread():
+        fn()
+    else:
+        AppHelper.callAfter(fn)
 
 
 class ProgressWindow:
@@ -80,16 +96,24 @@ class ProgressWindow:
             )
 
     def set_progress(self, percent):
-        if self._progress_bar:
-            self._progress_bar.setDoubleValue_(percent)
+        bar = self._progress_bar
+        if not bar:
+            return
+        _run_on_main(lambda: bar.setDoubleValue_(percent))
 
     def set_indeterminate(self, indeterminate):
-        if self._progress_bar:
-            self._progress_bar.setIndeterminate_(indeterminate)
+        bar = self._progress_bar
+        if not bar:
+            return
+
+        def _apply():
+            bar.setIndeterminate_(indeterminate)
             if indeterminate:
-                self._progress_bar.startAnimation_(None)
+                bar.startAnimation_(None)
             else:
-                self._progress_bar.stopAnimation_(None)
+                bar.stopAnimation_(None)
+
+        _run_on_main(_apply)
 
     def close(self):
         if self._window:

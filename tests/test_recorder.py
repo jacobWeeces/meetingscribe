@@ -91,7 +91,8 @@ def test_snapshot_side_local_valid_after_stop(monkeypatch):
     from meetingscribe import recorder
     monkeypatch.setattr(recorder.sd, "InputStream", mock.MagicMock())
     fake_sys = mock.MagicMock()
-    fake_sys.available.return_value = False  # mic-only keeps the assertion simple
+    fake_sys.available.return_value = False
+    fake_sys.is_capturing.return_value = False  # mic-only: recorder trusts is_capturing()
     monkeypatch.setattr(recorder, "SystemAudioRecorder", lambda: fake_sys)
 
     rec = recorder.AudioRecorder()

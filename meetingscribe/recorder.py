@@ -8,6 +8,7 @@ import sounddevice as sd
 from meetingscribe.config import SAMPLE_RATE, ensure_dirs
 from meetingscribe.system_audio import SystemAudioRecorder
 from meetingscribe.permissions import mic_authorization_status
+from meetingscribe.audio_format import GrowableMonoBuffer
 
 log = logging.getLogger("meetingscribe")
 
@@ -76,10 +77,17 @@ class AudioRecorder:
     def __init__(self):
         self._mic_frames = []
         self._mic_stream = None
+        self._mic_rate = SAMPLE_RATE   # rate the mic stream actually opened at
+        self._mic_failed = False       # True when no input stream could be opened
         self._sys = None
         self._system_available = False
         self._lock = threading.Lock()
         self.t0 = None
+        # Incremental mono accumulator for the local channel: folds each mic block
+        # in exactly once so repeated live-tick snapshots don't re-concatenate the
+        # whole history (was O(n^2) over a long meeting).
+        self._local_accum = None
+        self._local_cached_blocks = 0
 
     def _mic_callback(self, indata, frames, time_info, status):
         with self._lock:
@@ -102,30 +110,131 @@ class AudioRecorder:
             log.exception("mic: input-device selection failed; using system default")
             return None, None
 
+    def _device_default_rate(self, idx):
+        """Best-effort native sample rate (Hz) of the chosen input device, else None.
+
+        Opening a constrained device (e.g. a Bluetooth mic in HFP mode during a
+        call) at an unrelated rate like 44100 can fail with PortAudio
+        paInternalError (-9986) or capture silence; its native rate is the most
+        compatible choice.
+        """
+        try:
+            if idx is None:
+                idx = sd.default.device[0]
+                if not isinstance(idx, int) or idx < 0:
+                    return None
+        except Exception:
+            return None
+        info = None
+        try:
+            info = sd.query_devices(idx)
+        except Exception:
+            # Some backends / test doubles only support the no-arg list form.
+            try:
+                devs = sd.query_devices()
+                if isinstance(idx, int) and 0 <= idx < len(devs):
+                    info = devs[idx]
+            except Exception:
+                return None
+        try:
+            rate = int((info or {}).get("default_samplerate") or 0)
+            return rate or None
+        except Exception:
+            return None
+
+    def _open_mic_stream(self, mic_idx):
+        """Open the mic InputStream robustly: (actual_rate, stream) or (SAMPLE_RATE, None).
+
+        Tries the device's native rate first, then a few common rates, then the
+        PortAudio default device — so a single rate/device hiccup (the field
+        PaErrorCode -9986 seen when a call app already holds the mic) doesn't
+        kill capture of the user's own voice.
+        """
+        native = self._device_default_rate(mic_idx)
+        rates = []
+        for r in (native, SAMPLE_RATE, 48000, 16000):
+            if r and r not in rates:
+                rates.append(r)
+        attempts = [(mic_idx, r) for r in rates]
+        attempts.append((None, None))  # last resort: PortAudio's own default device+rate
+
+        last_err = None
+        for dev, rate in attempts:
+            try:
+                kwargs = dict(channels=1, dtype="float32", device=dev,
+                              callback=self._mic_callback)
+                if rate is not None:
+                    kwargs["samplerate"] = rate
+                stream = sd.InputStream(**kwargs)
+                stream.start()
+                try:
+                    actual = int(stream.samplerate)
+                except (TypeError, ValueError, AttributeError):
+                    actual = int(rate) if rate else SAMPLE_RATE
+                log.info("mic: opened device=%s at %d Hz",
+                         "default" if dev is None else dev, actual)
+                return actual, stream
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                log.warning("mic: InputStream open failed (device=%s rate=%s): %s",
+                            dev, rate, e)
+        log.error("mic: all input-stream open attempts failed: %s", last_err)
+        return SAMPLE_RATE, None
+
+    def _materialized_local(self) -> GrowableMonoBuffer:
+        """Fold any not-yet-cached mic blocks into the growable buffer, once each.
+
+        Single-consumer by design: the live worker calls this during recording and
+        the Stop thread calls it after the worker is joined, so the cache needs no
+        lock of its own — only the brief _mic_frames slice does.
+        """
+        accum = getattr(self, "_local_accum", None)
+        cached = getattr(self, "_local_cached_blocks", 0)
+        with self._lock:
+            total = len(self._mic_frames)
+            if accum is None or total < cached:
+                new = list(self._mic_frames)   # first build, or list was reset — rebuild
+                rebuild = True
+            else:
+                new = self._mic_frames[cached:total]
+                rebuild = False
+        if accum is None or rebuild:
+            accum = GrowableMonoBuffer()
+            self._local_accum = accum
+        for block in new:
+            accum.append(np.asarray(block, dtype="float32").reshape(-1))
+        self._local_cached_blocks = total
+        return accum
+
     def start(self):
         ensure_dirs()
         self._mic_frames = []
+        self._mic_failed = False
+        self._local_accum = None
+        self._local_cached_blocks = 0
         self.t0 = time.time()
 
         mic_idx, mic_name = self._choose_mic_device()
         log.info("mic: input device=%s (%s) auth=%s",
                  mic_idx, mic_name or "system default", mic_authorization_status())
 
-        self._mic_stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            device=mic_idx,
-            callback=self._mic_callback,
-        )
-        self._mic_stream.start()
+        # A mic open failure must NOT abort the whole recording: degrade to
+        # system-audio-only so other participants are still captured, and surface
+        # the failure (mic_failed) so the caller can warn the user.
+        self._mic_rate, self._mic_stream = self._open_mic_stream(mic_idx)
+        if self._mic_stream is None:
+            self._mic_failed = True
+            log.error("mic: could not open any input stream (device in use?); "
+                      "recording system audio only")
 
+        # start() is self-sufficient (it fetches shareable content and returns early
+        # without a stream if permission/displays are missing), so we call it directly
+        # rather than probing available() first — that probe did a second, redundant
+        # ScreenCaptureKit run-loop pump on the main thread (~12s worst case) every
+        # time recording started. Trust the resulting stream state for availability.
         self._sys = SystemAudioRecorder()
-        if self._sys.available():
-            self._sys.start()
-            self._system_available = True
-        else:
-            self._system_available = False
+        self._sys.start()
+        self._system_available = bool(self._sys.is_capturing())
 
     def stop(self) -> dict:
         if self._mic_stream:
@@ -133,13 +242,7 @@ class AudioRecorder:
             self._mic_stream.close()
             self._mic_stream = None
 
-        with self._lock:
-            frames = list(self._mic_frames)
-
-        if frames:
-            local = np.concatenate(frames).reshape(-1).astype("float32")
-        else:
-            local = np.zeros(0, dtype="float32")
+        local = self._materialized_local().view(0)
 
         if self._system_available and self._sys is not None:
             remote, remote_rate = self._sys.stop()
@@ -147,16 +250,17 @@ class AudioRecorder:
             remote = np.zeros(0, dtype="float32")
             remote_rate = 48000
 
+        local_rate = self._mic_rate or SAMPLE_RATE
         l_rms, l_peak = rms_peak(local)
         r_rms, r_peak = rms_peak(remote)
         log.info("capture levels: local rms=%.5f peak=%.5f (%.1fs) | "
                  "remote rms=%.5f peak=%.5f (%.1fs)",
-                 l_rms, l_peak, local.size / SAMPLE_RATE if local.size else 0.0,
+                 l_rms, l_peak, local.size / local_rate if local.size else 0.0,
                  r_rms, r_peak, remote.size / remote_rate if remote.size and remote_rate else 0.0)
 
         return {
             "local": local,
-            "local_rate": SAMPLE_RATE,
+            "local_rate": local_rate,
             "remote": remote,
             "remote_rate": remote_rate,
             "t0": self.t0,
@@ -170,12 +274,7 @@ class AudioRecorder:
         'local' = mic frames; 'remote' = system stream (empty when mic-only).
         """
         if side == "local":
-            with self._lock:
-                blocks = list(self._mic_frames)
-            if not blocks:
-                return np.zeros(0, dtype="float32")
-            mono = np.concatenate(blocks).reshape(-1).astype("float32")
-            return mono[start_frame:]
+            return self._materialized_local().view(start_frame)
         if side == "remote":
             if self._system_available and self._sys is not None:
                 return self._sys.snapshot(start_frame).astype("float32")
@@ -184,6 +283,14 @@ class AudioRecorder:
 
     def system_available(self) -> bool:
         return self._system_available
+
+    def local_rate(self) -> int:
+        """Sample rate the mic stream actually opened at (native rate when available)."""
+        return self._mic_rate or SAMPLE_RATE
+
+    def mic_failed(self) -> bool:
+        """True when no microphone input stream could be opened for this recording."""
+        return self._mic_failed
 
     def remote_rate(self) -> int:
         return self._sys.rate() if (self._system_available and self._sys is not None) else 48000

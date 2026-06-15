@@ -52,7 +52,9 @@ def _call_llm(prompt: str) -> str:
     client = anthropic.Anthropic(api_key=get_api_key())
     message = client.messages.create(
         model=ANTHROPIC_MODEL,
-        max_tokens=1024,
+        # The id->name map for a long meeting (hundreds of segments) can exceed 1024
+        # tokens; truncation makes the JSON unparseable and drops ALL names.
+        max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
     return message.content[0].text
@@ -67,8 +69,12 @@ def _parse_name_map(text: str) -> dict[int, str]:
     """
     try:
         start = text.index("{")
-        end = text.rindex("}") + 1
-        raw = json.loads(text[start:end])
+        # Decode the first complete JSON object from the first '{'. Using rindex to
+        # the LAST '}' breaks when the model appends any prose containing a brace
+        # (it would swallow the trailing text and fail to parse, dropping ALL names).
+        raw, _ = json.JSONDecoder().raw_decode(text[start:])
+        if not isinstance(raw, dict):
+            return {}
         result = {}
         for k, v in raw.items():
             if not v:

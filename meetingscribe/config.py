@@ -62,11 +62,11 @@ def _load_api_key():
     for env_path in candidates:
         try:
             if env_path.exists():
-                for line in env_path.read_text().splitlines():
+                for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
                     s = line.strip()
                     if s and not s.startswith("#") and s.startswith("ANTHROPIC_API_KEY="):
                         return s.split("=", 1)[1].strip().strip('"').strip("'")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             pass
     return ""
 

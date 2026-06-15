@@ -10,7 +10,7 @@ import AppKit
 import objc
 import rumps
 
-from meetingscribe.config import DATA_DIR, USER_PROFILE, ensure_dirs, SAMPLE_RATE, LIVE_CADENCE_SEC
+from meetingscribe.config import DATA_DIR, USER_PROFILE, ensure_dirs, LIVE_CADENCE_SEC
 from meetingscribe import settings
 from meetingscribe.recorder import AudioRecorder, local_silent_with_remote_signal
 from meetingscribe.permissions import request_mic_access
@@ -183,7 +183,7 @@ class MeetingScribeApp(rumps.App):
             rumps.MenuItem("Set API Key…", callback=self.set_api_key_clicked),
             rumps.MenuItem("Check for Updates…", callback=check_for_updates),
             None,
-            rumps.MenuItem("Quit", callback=rumps.quit_application),
+            rumps.MenuItem("Quit", callback=self._on_quit_clicked),
         ]
 
         self._recorder = AudioRecorder()
@@ -249,6 +249,56 @@ class MeetingScribeApp(rumps.App):
 
     def set_api_key_clicked(self, _sender):
         prompt_for_api_key()
+
+    # ------------------------------------------------------------------
+    # Quit (guard against discarding an in-flight meeting)
+    # ------------------------------------------------------------------
+
+    def _on_quit_clicked(self, _sender):
+        """Confirm before quitting if a recording is in progress or still processing.
+
+        The recording is never persisted to disk, so quitting mid-meeting silently
+        discards it. Warn first; only quit if the user confirms.
+        """
+        if self._processing:
+            _bring_to_front()
+            if not rumps.alert(
+                title="MeetingScribe — Still processing",
+                message="Your last meeting is still being transcribed and saved. "
+                        "Quitting now will lose it. Quit anyway?",
+                ok="Quit anyway", cancel="Keep working",
+            ):
+                return
+        elif self._recording:
+            _bring_to_front()
+            if not rumps.alert(
+                title="MeetingScribe — Recording in progress",
+                message="A recording is in progress and hasn't been saved yet. "
+                        "Quitting now will discard it. Quit anyway?",
+                ok="Quit anyway", cancel="Keep recording",
+            ):
+                return
+        rumps.quit_application()
+
+    def _set_title_main(self, text):
+        """Set the menu-bar title on the main thread (AppKit is main-thread-only).
+
+        _update_timer and _update_progress run on background threads, so writing
+        self.title (NSStatusItem) directly from them is an AppKit main-thread
+        violation; marshal it instead.
+        """
+        if threading.current_thread() is threading.main_thread():
+            self.title = text
+        else:
+            from PyObjCTools import AppHelper
+
+            def _apply():
+                try:
+                    self.title = text
+                except Exception:
+                    pass
+
+            AppHelper.callAfter(_apply)
 
     # ------------------------------------------------------------------
     # Live transcription toggle (checkbox only — worker not started yet)
@@ -333,35 +383,83 @@ class MeetingScribeApp(rumps.App):
     # Recording start / stop
     # ------------------------------------------------------------------
 
+    def _reset_to_idle(self, sender):
+        """Return the menu/state to a clean idle state after a failed start."""
+        self._recording = False
+        self._processing = False
+        try:
+            sender.title = "Start Recording"
+        except Exception:
+            pass
+        self.title = ICON_IDLE
+
     def _start_recording(self, sender):
         log.info("_start_recording: entered")
         try:
             self._recorder = AudioRecorder()
             _t0 = time.time()
             self._recorder.start()
-            log.info("_start_recording: recorder.start() in %.2fs (system_available=%s)",
-                     time.time() - _t0, self._recorder.system_available())
-            self._recording = True
-            self._start_time = time.time()
-            sender.title = "Stop Recording"
-            self.title = ICON_RECORDING
-            log.info("Recording started")
-
-            self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
-            self._timer_thread.start()
-
-            if settings.live_transcription_enabled():
-                self._live_local = LiveTranscriber(self._transcriber, SAMPLE_RATE, side="local")
-                remote_rate = self._recorder.remote_rate() if self._recorder.system_available() else 48000
-                self._live_remote = LiveTranscriber(self._transcriber, remote_rate, side="remote")
-                self._live_worker_thread = threading.Thread(target=self._live_worker, daemon=True)
-                self._live_worker_thread.start()
-                log.info("Live transcription workers started (per-channel)")
-            else:
-                self._live_local = self._live_remote = self._live_worker_thread = None
+            log.info("_start_recording: recorder.start() in %.2fs (mic_failed=%s system_available=%s)",
+                     time.time() - _t0, self._recorder.mic_failed(), self._recorder.system_available())
         except Exception:
+            # A failed start must never leave the app believing it is recording,
+            # and must never fail silently (the user would think a meeting is being
+            # captured when nothing is).
             log.exception("_start_recording FAILED")
-            raise
+            try:
+                self._recorder.stop()   # close any partially-opened stream
+            except Exception:
+                pass
+            self._reset_to_idle(sender)
+            _main_thread_alert(
+                "MeetingScribe — Couldn't start recording",
+                "Something went wrong starting the recording. The microphone or "
+                "system audio may be in use by another app — please try again in a "
+                "moment.",
+            )
+            return
+
+        # Nothing capturable at all: don't pretend to record.
+        if self._recorder.mic_failed() and not self._recorder.system_available():
+            log.error("_start_recording: neither microphone nor system audio available")
+            try:
+                self._recorder.stop()
+            except Exception:
+                pass
+            self._reset_to_idle(sender)
+            _main_thread_alert(
+                "MeetingScribe — Couldn't start recording",
+                "Couldn't open the microphone (it may be in use by another app) and "
+                "system-audio capture isn't available, so nothing would be recorded. "
+                "Recording was not started.",
+            )
+            return
+
+        self._recording = True
+        self._start_time = time.time()
+        sender.title = "Stop Recording"
+        self.title = ICON_RECORDING
+        log.info("Recording started")
+
+        if self._recorder.mic_failed():
+            # Mic couldn't open but system audio can — record the remote side and
+            # tell the user their own voice won't be captured (rather than letting
+            # them discover it only after the meeting).
+            notify("Microphone unavailable",
+                   "Your mic couldn't be opened — capturing other participants only.")
+
+        self._timer_thread = threading.Thread(target=self._update_timer, daemon=True)
+        self._timer_thread.start()
+
+        if settings.live_transcription_enabled():
+            self._live_local = LiveTranscriber(self._transcriber, self._recorder.local_rate(), side="local")
+            remote_rate = self._recorder.remote_rate() if self._recorder.system_available() else 48000
+            self._live_remote = LiveTranscriber(self._transcriber, remote_rate, side="remote")
+            self._live_worker_thread = threading.Thread(target=self._live_worker, daemon=True)
+            self._live_worker_thread.start()
+            log.info("Live transcription workers started (per-channel)")
+        else:
+            self._live_local = self._live_remote = self._live_worker_thread = None
 
     def _update_timer(self):
         while self._recording:
@@ -369,9 +467,9 @@ class MeetingScribeApp(rumps.App):
             mins, secs = divmod(elapsed, 60)
             hours, mins = divmod(mins, 60)
             if hours:
-                self.title = f"{ICON_RECORDING} {hours}:{mins:02d}:{secs:02d}"
+                self._set_title_main(f"{ICON_RECORDING} {hours}:{mins:02d}:{secs:02d}")
             else:
-                self.title = f"{ICON_RECORDING} {mins}:{secs:02d}"
+                self._set_title_main(f"{ICON_RECORDING} {mins}:{secs:02d}")
             time.sleep(1)
 
     def _live_worker(self):
@@ -425,7 +523,7 @@ class MeetingScribeApp(rumps.App):
     # ------------------------------------------------------------------
 
     def _update_progress(self, stage, pct=None, detail=""):
-        self.title = f"⏳ {stage}"
+        self._set_title_main(f"⏳ {stage}")
         log.info("Status: %s (%.0f%%)", stage, (pct or 0) * 100)
         if self._progress_window:
             self._progress_window.set_stage(stage)
@@ -437,7 +535,7 @@ class MeetingScribeApp(rumps.App):
                 self._progress_window.set_indeterminate(True)
 
     def _finish(self, title, message):
-        self.title = ICON_IDLE
+        self._set_title_main(ICON_IDLE)
         self._processing = False
         self._live_local = None
         self._live_remote = None
@@ -450,6 +548,7 @@ class MeetingScribeApp(rumps.App):
     # ------------------------------------------------------------------
 
     def _process_recording(self):
+        stopped = False
         try:
             # Single Whisper model: fully stop the live worker before transcribing here.
             if self._live_worker_thread is not None:
@@ -459,6 +558,7 @@ class MeetingScribeApp(rumps.App):
             self._update_progress("Loading model...", detail="First time takes a moment")
             self._transcriber._load_model()
             result = self._recorder.stop()
+            stopped = True
 
             mic_silent = local_silent_with_remote_signal(result["local"], result["remote"])
             if mic_silent:
@@ -496,12 +596,51 @@ class MeetingScribeApp(rumps.App):
                 summary = self._summarizer.summarize(transcript_text)
             except NoAPIKeyError:
                 from datetime import datetime as _dt
-                save_to_notes(f"Meeting — {_dt.now():%Y-%m-%d %H:%M}", transcript_text)
-                self._finish(
-                    "No API key",
-                    "Saved the transcript to Apple Notes, but skipped the AI summary — "
-                    "set your Anthropic API key (Set API Key…).",
+                if save_to_notes(f"Meeting — {_dt.now():%Y-%m-%d %H:%M}", transcript_text):
+                    self._finish(
+                        "No API key",
+                        "Saved the transcript to Apple Notes, but skipped the AI summary — "
+                        "set your Anthropic API key (Set API Key…).",
+                    )
+                else:
+                    self._finish(
+                        "Couldn't save",
+                        "No Anthropic API key is set, and the transcript couldn't be saved "
+                        "to Apple Notes either. Check that Notes is set up with an iCloud "
+                        "account.",
+                    )
+                return
+            except Exception:
+                # The recording is only ever persisted as the Apple Note below, so a
+                # transient API/network failure during summarization must NOT lose the
+                # transcript — save it (no summary) instead of crashing to a bare error.
+                log.exception("Summarization failed; saving transcript without an AI summary")
+                from datetime import datetime as _dt
+                ts = _dt.now().strftime("%Y-%m-%d %H:%M")
+                mic_banner = (
+                    "⚠️ Your microphone recorded no audio — only other participants were "
+                    "captured. Check System Settings → Privacy & Security → Microphone "
+                    "(and your input device), then re-record.\n\n"
+                    if mic_silent else ""
                 )
+                body = (
+                    f"MEETING NOTES — {ts}\n{'=' * 50}\n\n{mic_banner}"
+                    "(AI summary unavailable — the summarizer failed, likely a network "
+                    "or API error. Your full transcript is preserved below.)\n\n"
+                    f"{'=' * 50}\nRAW TRANSCRIPT\n{'=' * 50}\n\n{transcript_text}"
+                )
+                if save_to_notes(f"Meeting — {ts}", body):
+                    self._finish(
+                        "Summary failed",
+                        "Couldn't generate the AI summary (network or API error), but your "
+                        "transcript was saved to Apple Notes.",
+                    )
+                else:
+                    self._finish(
+                        "Couldn't save",
+                        "The AI summary failed and the transcript couldn't be saved to "
+                        "Apple Notes. Check that Notes is set up with an iCloud account.",
+                    )
                 return
             log.info("Summarization complete, length: %d chars", len(summary))
 
@@ -534,6 +673,14 @@ class MeetingScribeApp(rumps.App):
             log.exception("Error processing recording")
             self._finish("Error", f"Something went wrong:\n\n{str(e)[:300]}")
         finally:
+            # If we raised before recorder.stop() ran, the mic InputStream and the
+            # ScreenCaptureKit stream are still open — close them so a failed run
+            # doesn't leak audio resources.
+            if not stopped:
+                try:
+                    self._recorder.stop()
+                except Exception:
+                    pass
             if getattr(self._recorder, "_sys", None) is not None:
                 try:
                     self._recorder._sys.release()

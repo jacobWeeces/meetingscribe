@@ -128,13 +128,22 @@ if _SCK_AVAILABLE:
 
         @objc.python_method
         def snapshot_mono(self, start_frame: int) -> np.ndarray:
-            """Return mono float32 from start_frame to latest (thread-safe)."""
-            from meetingscribe.audio_format import planar_chunks_to_mono
+            """Return mono float32 from start_frame to latest (thread-safe).
+
+            Folds only newly-arrived chunks each call (amortized O(new)) instead of
+            re-converting the entire capture history every time — the latter was
+            O(n^2) over a long meeting's live ticks.
+            """
+            from meetingscribe.audio_format import PlanarChunkAccumulator
+            accum = getattr(self, "_mono_accum", None)
+            if accum is None:
+                accum = PlanarChunkAccumulator()
+                self._mono_accum = accum
             with self._lock:
                 chunks = list(self._chunks)        # cheap ref copy; convert outside the lock
                 channels = int(self._channels)
-            mono = planar_chunks_to_mono(chunks, channels)
-            return mono[start_frame:]
+            accum.update(chunks, channels)
+            return accum.view(start_frame)
 
         # --- SCStreamDelegate ---
         def stream_didStopWithError_(self, stream, error):
@@ -319,6 +328,14 @@ class SystemAudioRecorder:
         return (delegate.snapshot_mono(0), rate)
 
     # ------------------------------------------------------------------
+
+    def is_capturing(self) -> bool:
+        """True if a capture stream is currently active (i.e. start() actually succeeded).
+
+        start() returns on several failure paths leaving self._stream None; callers
+        must not assume available()==True means capture started.
+        """
+        return self._stream is not None
 
     def snapshot(self, start_frame: int) -> np.ndarray:
         """Mono system audio from start_frame to now (valid during and after capture)."""
